@@ -17,12 +17,13 @@ jonoluiten@gmail.com
 ## Installation
 ```bash
 # Install this repo (pytorch)
-git clone git@github.com:JonathonLuiten/Dynamic3DGaussians.git
+git clone https://github.com/cywhitebear/USplat4D.git
 conda env create --file environment.yml
-conda activate dynamic_gaussians
+conda activate usplat4d
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
 
 # Install rendering code (cuda)
-git clone git@github.com:JonathonLuiten/diff-gaussian-rasterization-w-depth.git
+git clone https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git
 cd diff-gaussian-rasterization-w-depth
 python setup.py install
 pip install .

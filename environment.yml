@@ -1,16 +1,14 @@
-name: dynamic_gaussians
+name: usplat4d
 channels:
   - pytorch
   - conda-forge
   - defaults
 dependencies:
-  - cudatoolkit=11.6
-  - python=3.7.13
+  - cudatoolkit=11.8
+  - python=3.10.19
   - pip=22.3.1
-  - pytorch=1.12.1
-  - torchaudio=0.12.1
-  - torchvision=0.13.1
   - tqdm=4.65.0
   - Pillow=9.4.0
+  - numpy=1.26.4
   - pip:
     - open3d==0.16.0
