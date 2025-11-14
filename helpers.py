@@ -31,7 +31,11 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100):
     return cam
 
 
-def params2rendervar(params):
+def params2rendervar(params, t=None):
+    if t is None:
+        means3D, rotations = evaluate_trajectory(params, t=0)
+    else:
+        means3D, rotations = evaluate_trajectory(params, t)
     rendervar = {
         'means3D': params['means3D'],
         'colors_precomp': params['rgb_colors'],
@@ -100,3 +104,34 @@ def save_params(output_params, seq, exp):
             to_save[k] = output_params[0][k]
     os.makedirs(f"./output/{exp}/{seq}", exist_ok=True)
     np.savez(f"./output/{exp}/{seq}/params", **to_save)
+
+
+def evaluate_trajectory(params, t):
+    """
+    Return (means3D, rotations) at timestep t
+    If params contains a continuous trajectory (e.g. 'traj_continuous'), evaluate it at time t.
+    otherwise, return the discrete parameters at index t.
+    """
+    if 'traj_continuous' in params:
+        return evaluate_continuous_trajectory(params['traj_continuous'], t)
+    else:
+        means3D = params['means3D']
+        rotations = torch.nn.functional.normalize(params['unnorm_rotations'])
+        return means3D, rotations
+
+
+def lerp(a, b, t):
+    return a * (1 - t) + b * t
+
+
+def slerp(q1, q2, t):
+    q1 = q1 / q1.linalg.norm(dim=-1, keepdim=True)
+    q2 = q2 / q2.linalg.norm(dim=-1, keepdim=True)
+    dot = (q1 * q2).sum(-1)
+    dot = torch.clamp(dot, -1.0, 1.0)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+    s1 = torch.sin((1 - t) * theta) / (sin_theta + 1e-10)
+    s2 = torch.sin(t * theta) / (sin_theta + 1e-10)
+    q2_adj = torch.where(dot[:, None] < 0, -q2, q2)
+    return s1[:, None] * q1 + s2[:, None] * q2_adj

@@ -52,6 +52,11 @@ def initialize_params(seq, md):
     }
     params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in
               params.items()}
+    # Placeholder for continuous trajectory
+    params['traj_continuous'] = torch.nn.Parameter(
+        torch.empty(0).cuda(),
+        rewuires_grad=False
+    )
     cam_centers = np.linalg.inv(md['w2c'][0])[:, :3, 3]  # Get scene radius
     scene_radius = 1.1 * np.max(np.linalg.norm(cam_centers - np.mean(cam_centers, 0)[None], axis=-1))
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -76,10 +81,10 @@ def initialize_optimizer(params, variables):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def get_loss(params, curr_data, variables, is_initial_timestep):
+def get_loss(params, curr_data, variables, is_initial_timestep, t):
     losses = {}
 
-    rendervar = params2rendervar(params)
+    rendervar = params2rendervar(params, t=t)
     rendervar['means2D'].retain_grad()
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     curr_id = curr_data['id']
@@ -87,7 +92,7 @@ def get_loss(params, curr_data, variables, is_initial_timestep):
     losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
 
-    segrendervar = params2rendervar(params)
+    segrendervar = params2rendervar(params, t=t)
     segrendervar['colors_precomp'] = params['seg_colors']
     seg, _, _, = Renderer(raster_settings=curr_data['cam'])(**segrendervar)
     losses['seg'] = 0.8 * l1_loss_v1(seg, curr_data['seg']) + 0.2 * (1.0 - calc_ssim(seg, curr_data['seg']))
@@ -174,9 +179,9 @@ def initialize_post_first_timestep(params, variables, optimizer, num_knn=20):
     return variables
 
 
-def report_progress(params, data, i, progress_bar, every_i=100):
+def report_progress(params, data, i, progress_bar, every_i=100, t=0):
     if i % every_i == 0:
-        im, _, _, = Renderer(raster_settings=data['cam'])(**params2rendervar(params))
+        im, _, _, = Renderer(raster_settings=data['cam'])(**params2rendervar(params, t))
         curr_id = data['id']
         im = torch.exp(params['cam_m'][curr_id])[:, None, None] * im + params['cam_c'][curr_id][:, None, None]
         psnr = calc_psnr(im, data['im']).mean()
@@ -203,23 +208,32 @@ def train(seq, exp):
         progress_bar = tqdm(range(num_iter_per_timestep), desc=f"timestep {t}")
         for i in range(num_iter_per_timestep):
             curr_data = get_batch(todo_dataset, dataset)
-            loss, variables = get_loss(params, curr_data, variables, is_initial_timestep)
+            loss, variables = get_loss(params, curr_data, variables, is_initial_timestep, t)
             loss.backward()
             with torch.no_grad():
-                report_progress(params, dataset[0], i, progress_bar)
+                report_progress(params, dataset[0], i, progress_bar, t)
                 if is_initial_timestep:
                     params, variables = densify(params, variables, optimizer, i)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
         progress_bar.close()
         output_params.append(params2cpu(params, is_initial_timestep))
+        # Save raw means and rotations for trajectory evaluation
+        if 'traj_snapshots' not in variables:
+            variables['traj_snapshots'] = []
+        variables['traj_snapshots'].append({
+            'means3D': params['means3D'].detach().cpu(),
+            'rotations': torch.nn.functional.normalize(params['unnorm_rotations'].detach().clone())
+        })
         if is_initial_timestep:
             variables = initialize_post_first_timestep(params, variables, optimizer)
     save_params(output_params, seq, exp)
 
 
 if __name__ == "__main__":
-    exp_name = "exp1"
-    for sequence in ["basketball", "boxes", "football", "juggle", "softball", "tennis"]:
+    exp_name = "exp_continuous_trajectory"
+    # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
+    datasets = ["basketball"]
+    for sequence in datasets:
         train(sequence, exp_name)
         torch.cuda.empty_cache()
