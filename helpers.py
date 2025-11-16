@@ -31,18 +31,19 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100):
     return cam
 
 
-def params2rendervar(params, t=None):
-    if t is None:
-        means3D, rotations = evaluate_trajectory(params, t=0)
+def params2rendervar(params, t=0, variables=None):
+    if variables is not None:
+        means3D, rotations = evaluate_trajectory(params, variables, t)
     else:
-        means3D, rotations = evaluate_trajectory(params, t)
+        means3D = params['means3D']
+        rotations = torch.nn.functional.normalize(params['unnorm_rotations'])
     rendervar = {
-        'means3D': params['means3D'],
+        'means3D': means3D,
         'colors_precomp': params['rgb_colors'],
-        'rotations': torch.nn.functional.normalize(params['unnorm_rotations']),
+        'rotations': rotations,
         'opacities': torch.sigmoid(params['logit_opacities']),
         'scales': torch.exp(params['log_scales']),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(means3D, requires_grad=True, device="cuda") + 0
     }
     return rendervar
 
@@ -106,32 +107,47 @@ def save_params(output_params, seq, exp):
     np.savez(f"./output/{exp}/{seq}/params", **to_save)
 
 
-def evaluate_trajectory(params, t):
+def evaluate_trajectory(params, variables, t):
     """
-    Return (means3D, rotations) at timestep t
-    If params contains a continuous trajectory (e.g. 'traj_continuous'), evaluate it at time t.
-    otherwise, return the discrete parameters at index t.
+    t may be int or float.
+    Uses linear interpolation for means3D and slerp for rotations.
+    If traj_continuous is empty -> discrete fallback.
     """
-    if 'traj_continuous' in params:
-        return evaluate_continuous_trajectory(params['traj_continuous'], t)
-    else:
+    if 'traj_snapshots' not in variables or len(variables['traj_snapshots']) == 0:
         means3D = params['means3D']
         rotations = torch.nn.functional.normalize(params['unnorm_rotations'])
         return means3D, rotations
 
+    traj_snaps = variables['traj_snapshots']
+    nums_t = len(traj_snaps)
+
+    if t <= 0:
+        return traj_snaps[0]['means3D'], torch.nn.functional.normalize(traj_snaps[0]['rotations'])
+    if t >= num_t - 1:
+        return traj_snaps[-1]['means3D'], torch.nn.functional.normalize(traj_snaps[-1]['rotations'])
+
+    t0 = int(np.floor(t))
+    t1 = t0 + 1
+    alpha = t - t0
+    means3D_0 = traj_snaps[t0]['means3D']
+    means3D_1 = traj_snaps[t1]['means3D']
+    rotations_0 = torch.nn.functional.normalize(traj_snaps[t0]['rotations'])
+    rotations_1 = torch.nn.functional.normalize(traj_snaps[t1]['rotations'])
+    means3D = lerp(means3D_0, means3D_1, alpha)
+    rotations = slerp(rotations_0, rotations_1, alpha)
+    return means3D, rotations
 
 def lerp(a, b, t):
     return a * (1 - t) + b * t
 
 
-def slerp(q1, q2, t):
-    q1 = q1 / q1.linalg.norm(dim=-1, keepdim=True)
-    q2 = q2 / q2.linalg.norm(dim=-1, keepdim=True)
+def slerp(q1, q2, t, tolerance=1e-7):
     dot = (q1 * q2).sum(-1)
-    dot = torch.clamp(dot, -1.0, 1.0)
-    theta = torch.acos(dot)
+    q2_ = torch.where(dot[:, None] < 0, -q2, q2)
+    dot = torch.abs(dot)
+    theta = torch.acos(torch.clamp(dot, -1 + tolerance, 1 - tolerance))
     sin_theta = torch.sin(theta)
-    s1 = torch.sin((1 - t) * theta) / (sin_theta + 1e-10)
-    s2 = torch.sin(t * theta) / (sin_theta + 1e-10)
-    q2_adj = torch.where(dot[:, None] < 0, -q2, q2)
-    return s1[:, None] * q1 + s2[:, None] * q2_adj
+    s1 = torch.sin((1 - t) * theta) / (sin_theta + tolerance)
+    s2 = torch.sin(t * theta) / (sin_theta + tolerance)
+    return (q1 * s1[:, None]) + (q2_ * s2[:, None])
+    

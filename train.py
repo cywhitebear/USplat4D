@@ -84,7 +84,7 @@ def initialize_optimizer(params, variables):
 def get_loss(params, curr_data, variables, is_initial_timestep, t):
     losses = {}
 
-    rendervar = params2rendervar(params, t=t)
+    rendervar = params2rendervar(params, t=t, variables=variables)
     rendervar['means2D'].retain_grad()
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     curr_id = curr_data['id']
@@ -92,7 +92,7 @@ def get_loss(params, curr_data, variables, is_initial_timestep, t):
     losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
 
-    segrendervar = params2rendervar(params, t=t)
+    segrendervar = params2rendervar(params, t=t, variables=variables)
     segrendervar['colors_precomp'] = params['seg_colors']
     seg, _, _, = Renderer(raster_settings=curr_data['cam'])(**segrendervar)
     losses['seg'] = 0.8 * l1_loss_v1(seg, curr_data['seg']) + 0.2 * (1.0 - calc_ssim(seg, curr_data['seg']))
