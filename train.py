@@ -8,7 +8,7 @@ from random import randint
 from tqdm import tqdm
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from helpers import setup_camera, l1_loss_v1, l1_loss_v2, weighted_l2_loss_v1, weighted_l2_loss_v2, quat_mult, \
-    o3d_knn, params2rendervar, params2cpu, save_params
+    o3d_knn, params2rendervar, params2cpu, save_params, evaluate_trajectory
 from external import calc_ssim, calc_psnr, build_rotation, densify, update_params_and_optimizer
 
 
@@ -55,7 +55,7 @@ def initialize_params(seq, md):
     # Placeholder for continuous trajectory
     params['traj_continuous'] = torch.nn.Parameter(
         torch.empty(0).cuda(),
-        rewuires_grad=False
+        requires_grad=False
     )
     cam_centers = np.linalg.inv(md['w2c'][0])[:, :3, 3]  # Get scene radius
     scene_radius = 1.1 * np.max(np.linalg.norm(cam_centers - np.mean(cam_centers, 0)[None], axis=-1))
@@ -76,6 +76,7 @@ def initialize_optimizer(params, variables):
         'log_scales': 0.001,
         'cam_m': 1e-4,
         'cam_c': 1e-4,
+        'traj_continuous': 0.0,
     }
     param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
@@ -211,7 +212,7 @@ def train(seq, exp):
             loss, variables = get_loss(params, curr_data, variables, is_initial_timestep, t)
             loss.backward()
             with torch.no_grad():
-                report_progress(params, dataset[0], i, progress_bar, t)
+                report_progress(params, dataset[0], i, progress_bar, t=t)
                 if is_initial_timestep:
                     params, variables = densify(params, variables, optimizer, i)
                 optimizer.step()
@@ -222,18 +223,22 @@ def train(seq, exp):
         if 'traj_snapshots' not in variables:
             variables['traj_snapshots'] = []
         variables['traj_snapshots'].append({
-            'means3D': params['means3D'].detach().cpu(),
-            'rotations': torch.nn.functional.normalize(params['unnorm_rotations'].detach().clone())
+            'means3D': params['means3D'].detach().clone().contiguous(),
+            'rotations': torch.nn.functional.normalize(params['unnorm_rotations'].detach().clone()).contiguous()
         })
         if is_initial_timestep:
             variables = initialize_post_first_timestep(params, variables, optimizer)
+        if t == 1:
+            m0, _ = evaluate_trajectory(params, variables, t=0)
+            m1, _ = evaluate_trajectory(params, variables, t=1)
+            print("Δpos:", torch.norm(m1 - m0).item())
     save_params(output_params, seq, exp)
 
 
 if __name__ == "__main__":
     exp_name = "exp_continuous_trajectory"
     # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
-    datasets = ["basketball"]
+    datasets = ["boxes"]
     for sequence in datasets:
         train(sequence, exp_name)
         torch.cuda.empty_cache()

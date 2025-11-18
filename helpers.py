@@ -113,26 +113,32 @@ def evaluate_trajectory(params, variables, t):
     Uses linear interpolation for means3D and slerp for rotations.
     If traj_continuous is empty -> discrete fallback.
     """
+    device = params['means3D'].device
+
     if 'traj_snapshots' not in variables or len(variables['traj_snapshots']) == 0:
         means3D = params['means3D']
         rotations = torch.nn.functional.normalize(params['unnorm_rotations'])
         return means3D, rotations
 
     traj_snaps = variables['traj_snapshots']
-    nums_t = len(traj_snaps)
+    num_t = len(traj_snaps)
 
     if t <= 0:
-        return traj_snaps[0]['means3D'], torch.nn.functional.normalize(traj_snaps[0]['rotations'])
+        m = traj_snaps[0]['means3D'].to(device)
+        r = torch.nn.functional.normalize(traj_snaps[0]['rotations'].to(device))
+        return m, r
     if t >= num_t - 1:
-        return traj_snaps[-1]['means3D'], torch.nn.functional.normalize(traj_snaps[-1]['rotations'])
+        m = traj_snaps[-1]['means3D'].to(device)
+        r = torch.nn.functional.normalize(traj_snaps[-1]['rotations'].to(device))
+        return m, r
 
     t0 = int(np.floor(t))
     t1 = t0 + 1
     alpha = t - t0
-    means3D_0 = traj_snaps[t0]['means3D']
-    means3D_1 = traj_snaps[t1]['means3D']
-    rotations_0 = torch.nn.functional.normalize(traj_snaps[t0]['rotations'])
-    rotations_1 = torch.nn.functional.normalize(traj_snaps[t1]['rotations'])
+    means3D_0 = traj_snaps[t0]['means3D'].to(device).contiguous()
+    means3D_1 = traj_snaps[t1]['means3D'].to(device).contiguous()
+    rotations_0 = torch.nn.functional.normalize(traj_snaps[t0]['rotations']).to(device).contiguous()
+    rotations_1 = torch.nn.functional.normalize(traj_snaps[t1]['rotations']).to(device).contiguous()
     means3D = lerp(means3D_0, means3D_1, alpha)
     rotations = slerp(rotations_0, rotations_1, alpha)
     return means3D, rotations
