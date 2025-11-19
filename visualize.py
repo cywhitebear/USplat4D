@@ -235,6 +235,6 @@ def visualize(seq, exp):
 if __name__ == "__main__":
     exp_name = "exp_continuous_trajectory"
     # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
-    datasets = ["basketball"]
+    datasets = ["boxes"]
     for sequence in datasets:
         visualize(sequence, exp_name)

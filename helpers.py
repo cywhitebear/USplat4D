@@ -32,6 +32,10 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100):
 
 
 def params2rendervar(params, t=0, variables=None):
+    """
+    If variables is None, use discrete params.
+    If variables is given, use evaluate_trajectory to get time-dependent means3D and rotations.
+    """
     if variables is not None:
         means3D, rotations = evaluate_trajectory(params, variables, t)
     else:
