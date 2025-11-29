@@ -10,6 +10,8 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from helpers import setup_camera, l1_loss_v1, l1_loss_v2, weighted_l2_loss_v1, weighted_l2_loss_v2, quat_mult, \
     o3d_knn, params2rendervar, params2cpu, save_params
 from external import calc_ssim, calc_psnr, build_rotation, densify, update_params_and_optimizer
+from usplat4d.uncertainty_proxy import compute_proxy_uncertainty_from_scale_opacity
+from usplat4d.uncertainty_overlay_pil import overlay_uncertainty_on_image_pil
 
 
 def get_dataset(t, md, seq):
@@ -23,7 +25,16 @@ def get_dataset(t, md, seq):
         seg = np.array(copy.deepcopy(Image.open(f"./data/{seq}/seg/{fn.replace('.jpg', '.png')}"))).astype(np.float32)
         seg = torch.tensor(seg).float().cuda()
         seg_col = torch.stack((seg, torch.zeros_like(seg), 1 - seg))
-        dataset.append({'cam': cam, 'im': im, 'seg': seg_col, 'id': c})
+        dataset.append({
+            'cam': cam,
+            'im': im,
+            'seg': seg_col,
+            'id': c,
+            'K': torch.tensor(k).cuda().float(),        # 3x3 intrinsics
+            'w2c': torch.tensor(w2c).cuda().float(),    # 4x4 world-to-camera
+            'width': w,
+            'height': h,
+        })
     return dataset
 
 
@@ -86,6 +97,60 @@ def get_loss(params, curr_data, variables, is_initial_timestep):
     im = torch.exp(params['cam_m'][curr_id])[:, None, None] * im + params['cam_c'][curr_id][:, None, None]
     losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
+
+    # --- USplat4D proxy uncertainty: compute every iteration ---
+    gaussian_scales = torch.exp(params['log_scales'])                 # (N,3)
+    gaussian_opacity = torch.sigmoid(params['logit_opacities']).view(-1)  # (N,)
+    proxy_uncertainty = compute_proxy_uncertainty_from_scale_opacity(
+        gaussian_scales=gaussian_scales,
+        gaussian_opacity=gaussian_opacity,
+    )  # (N,)
+
+    if not is_initial_timestep:
+        variables['curr_uncertainty_list'].append(proxy_uncertainty.detach().cpu())
+
+
+    # ------------------------------------------------------------
+    # USplat4D: proxy per-Gaussian uncertainty + one overlay dump
+    # ------------------------------------------------------------
+    if 'saved_uncertainty_debug' not in variables:
+        with torch.no_grad():
+            rendered_np = im.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
+
+            # accumulate uncertainty for this timestep
+            variables.setdefault('curr_uncertainty_list', []).append(proxy_uncertainty.detach().cpu())
+
+            pts_world = params['means3D']                      # (N,3)
+            N = pts_world.shape[0]
+            ones = torch.ones((N, 1), device=pts_world.device)
+            pts_h = torch.cat([pts_world, ones], dim=1)        # (N,4)
+
+            w2c = curr_data['w2c']                             # (4,4)
+            pts_cam = (w2c @ pts_h.T).T                        # (N,4)
+            Xc = pts_cam[:, 0]
+            Yc = pts_cam[:, 1]
+            Zc = pts_cam[:, 2].clamp(min=1e-6)
+
+            K = curr_data['K']                                 # (3,3)
+            fx = K[0, 0]; fy = K[1, 1]
+            cx = K[0, 2]; cy = K[1, 2]
+
+            u = fx * (Xc / Zc) + cx
+            v = fy * (Yc / Zc) + cy
+            centers2d_px = torch.stack([u, v], dim=1)          # (N,2)
+
+            overlay_path = f"./output/uncertainty_debug_t{curr_id:02d}.png"
+            overlay_uncertainty_on_image_pil(
+                image_np=rendered_np,
+                centers2d=centers2d_px,
+                uncertainty=proxy_uncertainty,
+                radii_px=radius,
+                out_path=overlay_path,
+            )
+            print(f"[USplat4D DEBUG] Saved uncertainty overlay: {overlay_path}")
+
+            variables['saved_uncertainty_debug'] = True
+
 
     segrendervar = params2rendervar(params)
     segrendervar['colors_precomp'] = params['seg_colors']
@@ -191,8 +256,12 @@ def train(seq, exp):
     md = json.load(open(f"./data/{seq}/train_meta.json", 'r'))  # metadata
     num_timesteps = len(md['fn'])
     params, variables = initialize_params(seq, md)
+    variables['temporal_uncertainty'] = []
     optimizer = initialize_optimizer(params, variables)
     output_params = []
+    variables['temporal_uncertainty'] = []   # list of length T, each is (N,) tensor
+    variables['curr_uncertainty_list'] = []  # per-iteration accumulation within one timestep
+
     for t in range(num_timesteps):
         dataset = get_dataset(t, md, seq)
         todo_dataset = []
@@ -212,14 +281,33 @@ def train(seq, exp):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
         progress_bar.close()
+
+        # --- summarize proxy uncertainty for this timestep ---
+        # Only summarize uncertainty for t >= 1 (no densification)
+        if not is_initial_timestep and len(variables['curr_uncertainty_list']) > 0:
+            # stack: (num_iters, N)
+            u_stack = torch.stack(variables['curr_uncertainty_list'], dim=0)
+            # mean over iterations → (N,)
+            u_mean = u_stack.mean(0)
+            variables['temporal_uncertainty'].append(u_mean)  # list length grows with t
+        variables['curr_uncertainty_list'] = []
+
         output_params.append(params2cpu(params, is_initial_timestep))
         if is_initial_timestep:
             variables = initialize_post_first_timestep(params, variables, optimizer)
     save_params(output_params, seq, exp)
+    if len(variables['temporal_uncertainty']) > 0:
+        # (N, T) tensor
+        unc_mat = torch.stack(variables['temporal_uncertainty'], dim=1)
+        os.makedirs(f"./output/{exp}/{seq}", exist_ok=True)
+        torch.save(unc_mat, f"./output/{exp}/{seq}/uncertainty_proxy.pt")
+        print(f"[USplat4D] Saved proxy temporal uncertainty to ./output/{exp}/{seq}/uncertainty_proxy.pt")
 
 
 if __name__ == "__main__":
-    exp_name = "exp1"
-    for sequence in ["basketball", "boxes", "football", "juggle", "softball", "tennis"]:
+    exp_name = "exp_uncertainty_proxy"
+    # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
+    datasets = ["basketball"]
+    for sequence in datasets:
         train(sequence, exp_name)
         torch.cuda.empty_cache()
