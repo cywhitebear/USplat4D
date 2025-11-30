@@ -98,52 +98,72 @@ def get_loss(params, curr_data, variables, is_initial_timestep):
     losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
 
-    # --- USplat4D proxy uncertainty: compute every iteration ---
-    gaussian_scales = torch.exp(params['log_scales'])                 # (N,3)
-    gaussian_opacity = torch.sigmoid(params['logit_opacities']).view(-1)  # (N,)
-    proxy_uncertainty = compute_proxy_uncertainty_from_scale_opacity(
-        gaussian_scales=gaussian_scales,
-        gaussian_opacity=gaussian_opacity,
-    )  # (N,)
+    # ------------------------------------------------------------
+    # USplat4D-style photometric uncertainty per Gaussian
+    # ------------------------------------------------------------
+    pts_world = params['means3D']                   # (N,3)
+    N = pts_world.shape[0]
 
+    # homogeneous
+    ones = torch.ones((N, 1), device=pts_world.device)
+    pts_h = torch.cat([pts_world, ones], dim=1)      # (N,4)
+
+    # project using w2c
+    w2c = curr_data['w2c']                            # (4,4)
+    pts_cam = (w2c @ pts_h.T).T                       # (N,4)
+    Xc = pts_cam[:, 0]
+    Yc = pts_cam[:, 1]
+    Zc = pts_cam[:, 2].clamp(min=1e-6)
+
+    # intrinsics
+    K = curr_data['K']
+    fx = K[0, 0]; fy = K[1, 1]
+    cx = K[0, 2]; cy = K[1, 2]
+
+    # pixel centers
+    u = fx * (Xc / Zc) + cx
+    v = fy * (Yc / Zc) + cy
+
+    # clamp to image
+    H = curr_data['height']
+    W = curr_data['width']
+    u_clamped = u.clamp(0, W - 1).long()
+    v_clamped = v.clamp(0, H - 1).long()
+
+    # gather pixel RGB
+    pred_rgb = im[:, v_clamped, u_clamped].permute(1, 0)   # (N,3)
+    gt_rgb   = curr_data['im'][:, v_clamped, u_clamped].permute(1, 0)
+
+    # per-Gaussian photometric residual
+    uncertainty = torch.abs(pred_rgb - gt_rgb).mean(dim=1)   # (N,)
+
+    # accumulate for t >= 1
     if not is_initial_timestep:
-        variables['curr_uncertainty_list'].append(proxy_uncertainty.detach().cpu())
+        variables['curr_uncertainty_list'].append(uncertainty.detach().cpu())
 
+    # quick debug print every ~200 iters
+    if (variables.get("debug_counter", 0) % 200) == 0:
+        u_mean = uncertainty.mean().item()
+        u_max  = uncertainty.max().item()
+        u_min  = uncertainty.min().item()
+        print(f"[uncertainty-debug] mean={u_mean:.5f}, max={u_max:.5f}, min={u_min:.5f}, N={N}")
+
+    variables["debug_counter"] = variables.get("debug_counter", 0) + 1
 
     # ------------------------------------------------------------
-    # USplat4D: proxy per-Gaussian uncertainty + one overlay dump
+    # USplat4D: one overlay dump
     # ------------------------------------------------------------
     if 'saved_uncertainty_debug' not in variables:
         with torch.no_grad():
             rendered_np = im.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
 
-            # accumulate uncertainty for this timestep
-            variables.setdefault('curr_uncertainty_list', []).append(proxy_uncertainty.detach().cpu())
-
-            pts_world = params['means3D']                      # (N,3)
-            N = pts_world.shape[0]
-            ones = torch.ones((N, 1), device=pts_world.device)
-            pts_h = torch.cat([pts_world, ones], dim=1)        # (N,4)
-
-            w2c = curr_data['w2c']                             # (4,4)
-            pts_cam = (w2c @ pts_h.T).T                        # (N,4)
-            Xc = pts_cam[:, 0]
-            Yc = pts_cam[:, 1]
-            Zc = pts_cam[:, 2].clamp(min=1e-6)
-
-            K = curr_data['K']                                 # (3,3)
-            fx = K[0, 0]; fy = K[1, 1]
-            cx = K[0, 2]; cy = K[1, 2]
-
-            u = fx * (Xc / Zc) + cx
-            v = fy * (Yc / Zc) + cy
             centers2d_px = torch.stack([u, v], dim=1)          # (N,2)
 
             overlay_path = f"./output/uncertainty_debug_t{curr_id:02d}.png"
             overlay_uncertainty_on_image_pil(
                 image_np=rendered_np,
                 centers2d=centers2d_px,
-                uncertainty=proxy_uncertainty,
+                uncertainty=uncertainty,
                 radii_px=radius,
                 out_path=overlay_path,
             )
@@ -305,7 +325,7 @@ def train(seq, exp):
 
 
 if __name__ == "__main__":
-    exp_name = "exp_uncertainty_proxy"
+    exp_name = "exp_uncertainty_1"
     # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
     datasets = ["basketball"]
     for sequence in datasets:
