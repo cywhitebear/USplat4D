@@ -65,11 +65,18 @@ def initialize_params(seq, md):
               params.items()}
     cam_centers = np.linalg.inv(md['w2c'][0])[:, :3, 3]  # Get scene radius
     scene_radius = 1.1 * np.max(np.linalg.norm(cam_centers - np.mean(cam_centers, 0)[None], axis=-1))
-    variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'scene_radius': scene_radius,
-                 'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'denom': torch.zeros(params['means3D'].shape[0]).cuda().float()}
+
+    N = params['means3D'].shape[0]
+    variables = {
+        'max_2D_radius': torch.zeros(N, device="cuda", dtype=torch.float32),
+        'scene_radius': scene_radius,
+        'means2D_gradient_accum': torch.zeros(N, device="cuda", dtype=torch.float32),
+        'denom': torch.zeros(N, device="cuda", dtype=torch.float32),
+        # for per-timestep visibility accumulation
+        'seen_any': torch.zeros(N, device="cuda", dtype=torch.bool),
+    }
     return params, variables
+
 
 
 def initialize_optimizer(params, variables):
@@ -141,14 +148,6 @@ def get_loss(params, curr_data, variables, is_initial_timestep):
     if not is_initial_timestep:
         variables['curr_uncertainty_list'].append(uncertainty.detach().cpu())
 
-    # quick debug print every ~200 iters
-    if (variables.get("debug_counter", 0) % 200) == 0:
-        u_mean = uncertainty.mean().item()
-        u_max  = uncertainty.max().item()
-        u_min  = uncertainty.min().item()
-        print(f"[uncertainty-debug] mean={u_mean:.5f}, max={u_max:.5f}, min={u_min:.5f}, N={N}")
-
-    variables["debug_counter"] = variables.get("debug_counter", 0) + 1
 
     # ------------------------------------------------------------
     # USplat4D: one overlay dump
@@ -207,10 +206,18 @@ def get_loss(params, curr_data, variables, is_initial_timestep):
     loss_weights = {'im': 1.0, 'seg': 3.0, 'rigid': 4.0, 'rot': 4.0, 'iso': 2.0, 'floor': 2.0, 'bg': 20.0,
                     'soft_col_cons': 0.01}
     loss = sum([loss_weights[k] * v for k, v in losses.items()])
+
     seen = radius > 0
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
+    if not is_initial_timestep:
+        if 'seen_any' not in variables or variables['seen_any'].shape[0] != seen.shape[0]:
+            variables['seen_any'] = torch.zeros_like(seen, dtype=torch.bool)
+        variables['seen_any'] |= seen
+
     return loss, variables
+
+
 
 
 def initialize_per_timestep(params, variables, optimizer):
@@ -276,16 +283,28 @@ def train(seq, exp):
     md = json.load(open(f"./data/{seq}/train_meta.json", 'r'))  # metadata
     num_timesteps = len(md['fn'])
     params, variables = initialize_params(seq, md)
-    variables['temporal_uncertainty'] = []
     optimizer = initialize_optimizer(params, variables)
     output_params = []
-    variables['temporal_uncertainty'] = []   # list of length T, each is (N,) tensor
-    variables['curr_uncertainty_list'] = []  # per-iteration accumulation within one timestep
+
+    # temporal containers
+    variables['temporal_uncertainty'] = []    # list of per-timestep (N,) tensors (u_mean_t)
+    variables['curr_uncertainty_list'] = []   # per-iteration per-timestep uncertainties (N,)
+    variables['uncertainty_window'] = []      # sliding window of last W timesteps, (N,) each, CPU
+    variables['visibility_window'] = []       # sliding window of last W timesteps, (N,) bool, CPU
+
 
     for t in range(num_timesteps):
         dataset = get_dataset(t, md, seq)
         todo_dataset = []
         is_initial_timestep = (t == 0)
+
+        if not is_initial_timestep:
+            N = params['means3D'].shape[0]
+            if 'seen_any' not in variables or variables['seen_any'].shape[0] != N:
+                variables['seen_any'] = torch.zeros(N, device="cuda", dtype=torch.bool)
+            else:
+                variables['seen_any'].zero_()
+
         if not is_initial_timestep:
             params, variables = initialize_per_timestep(params, variables, optimizer)
         num_iter_per_timestep = 10000 if is_initial_timestep else 2000
@@ -302,14 +321,114 @@ def train(seq, exp):
                 optimizer.zero_grad(set_to_none=True)
         progress_bar.close()
 
-        # --- summarize proxy uncertainty for this timestep ---
-        # Only summarize uncertainty for t >= 1 (no densification)
+        # --- summarize uncertainty for this timestep ---
+        # Only summarize uncertainty for t >= 1 (no densification step t=0)
         if not is_initial_timestep and len(variables['curr_uncertainty_list']) > 0:
             # stack: (num_iters, N)
-            u_stack = torch.stack(variables['curr_uncertainty_list'], dim=0)
+            u_stack = torch.stack(variables['curr_uncertainty_list'], dim=0)   # (num_iters, N)
             # mean over iterations → (N,)
-            u_mean = u_stack.mean(0)
-            variables['temporal_uncertainty'].append(u_mean)  # list length grows with t
+            u_mean = u_stack.mean(0)                                           # (N,)
+
+            # store per-timestep uncertainty (for debugging / saving)
+            variables['temporal_uncertainty'].append(u_mean.cpu())
+
+            # update sliding windows (significant period)
+            variables['uncertainty_window'].append(u_mean.cpu())               # (N,)
+            variables['visibility_window'].append(variables['seen_any'].cpu()) # (N,)
+
+            window_size = 5   # paper's minimum significant period
+            if len(variables['uncertainty_window']) > window_size:
+                variables['uncertainty_window'].pop(0)
+                variables['visibility_window'].pop(0)
+
+            # --- key-node selection with significant period ---
+            W = len(variables['uncertainty_window'])
+            T_min = 5  # significant period length
+
+            if W >= T_min:
+                # shape: (W, N)
+                u_win = torch.stack(variables['uncertainty_window'], dim=0)        # float
+                v_win = torch.stack(variables['visibility_window'], dim=0).float() # 0/1
+
+                # significant period: number of visible frames in window
+                sig_counts = v_win.sum(dim=0)                                      # (N,)
+
+                # only Gaussians with enough visibility are considered
+                valid_mask = sig_counts >= T_min                                   # (N,) bool
+
+                if valid_mask.any():
+                    # average uncertainty over significant period
+                    weighted_sum = (u_win * v_win).sum(dim=0)                      # (N,)
+                    avg_unc = torch.full_like(weighted_sum, float('inf'))          # (N,)
+                    avg_unc[valid_mask] = weighted_sum[valid_mask] / sig_counts[valid_mask]
+
+                    # lowest 2% avg uncertainty among valid Gaussians
+                    tau = torch.quantile(avg_unc[valid_mask], 0.02)
+                    base_key_mask = (avg_unc <= tau) & valid_mask                  # (N,) bool
+
+                    # --------------------------------------------------
+                    # voxel-based spatial sparsification (page 5)
+                    # --------------------------------------------------
+                    pts = params['means3D'].detach()                               # (N,3), cuda
+                    N = pts.shape[0]
+
+                    # set voxel size once, based on scene radius
+                    if 'voxel_size' not in variables:
+                        # heuristic: coarse grid ~ 5% of scene radius
+                        variables['voxel_size'] = variables['scene_radius'] * 0.05
+                    voxel_size = variables['voxel_size']
+
+                    # indices of base key candidates
+                    idx_key = torch.nonzero(base_key_mask, as_tuple=False).view(-1)
+                    if idx_key.numel() == 0:
+                        key_mask = base_key_mask
+                        variables.setdefault('key_gaussians', []).append(key_mask.cpu())
+                        print(
+                            f"[key-selection] t={t}, "
+                            f"valid={valid_mask.sum().item()}, "
+                            f"base_selected={base_key_mask.sum().item()}, "
+                            f"voxel_selected=0, "
+                            f"tau={tau.item():.6f}"
+                        )
+                    else:
+                        pts_key = pts[idx_key].cpu()                               # (M,3)
+                        avg_unc_key = avg_unc[idx_key].cpu()                       # (M,)
+
+                        # voxel coordinates
+                        coords = torch.floor(pts_key / voxel_size).to(torch.int64) # (M,3)
+
+                        # choose one Gaussian per voxel: lowest uncertainty in that voxel
+                        # we do this in Python for clarity; M is small (~2% of N)
+                        coords_np = coords.numpy()
+                        avg_unc_np = avg_unc_key.numpy()
+                        idx_key_np = idx_key.cpu().numpy()
+
+                        voxel_best = {}  # (vx,vy,vz) -> (best_unc, best_idx)
+                        for v, u_val, g_idx in zip(coords_np, avg_unc_np, idx_key_np):
+                            key_tuple = (int(v[0]), int(v[1]), int(v[2]))
+                            if key_tuple not in voxel_best or u_val < voxel_best[key_tuple][0]:
+                                voxel_best[key_tuple] = (u_val, g_idx)
+
+                        # build final key_mask
+                        key_mask = torch.zeros(N, dtype=torch.bool)
+                        for _, (_, g_idx) in voxel_best.items():
+                            key_mask[g_idx] = True
+
+                        variables.setdefault('key_gaussians', []).append(key_mask.cpu())
+
+                        print(
+                            f"[key-selection] t={t}, "
+                            f"valid={valid_mask.sum().item()}, "
+                            f"base_selected={base_key_mask.sum().item()}, "
+                            f"voxel_selected={key_mask.sum().item()}, "
+                            f"tau={tau.item():.6f}"
+                        )
+
+                else:
+                    print(f"[key-selection] t={t}, no Gaussians with significant period >= {T_min}")
+            else:
+                print(f"[key-selection] t={t}, window={W} < T_min={T_min}, skip key-node selection")
+
         variables['curr_uncertainty_list'] = []
 
         output_params.append(params2cpu(params, is_initial_timestep))
