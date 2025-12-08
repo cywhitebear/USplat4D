@@ -1,0 +1,329 @@
+# usplat4d/temporal_graph.py
+"""
+Temporal graph construction for USplat4D (§4.2(b)).
+
+Builds uncertainty-aware adjacency between key nodes and non-key nodes,
+encoding spatial affinity and motion similarity.
+"""
+
+import torch
+import numpy as np
+from typing import Tuple, Dict, List
+from .state import TemporalState
+
+
+def build_temporal_graph(
+    params: dict,
+    state: TemporalState,
+    output_params: list,
+    t: int,
+    num_knn: int = 5,
+) -> None:
+    """
+    Construct temporal graph encoding edges between key and non-key nodes.
+    
+    Implements §4.2(b) edge construction:
+    - Key-key edges: UA-kNN on uncertainty-weighted Mahalanobis distance
+    - Non-key edges: assignment to closest key node across entire sequence
+    
+    Args:
+        params: Gaussian parameters dict with 'means3D', 'unnorm_rotations', etc.
+        state: TemporalState with key_gaussians, uncertainty_window
+        output_params: List of saved params per timestep (for historical positions)
+        t: Current timestep
+        num_knn: Number of neighbors for key-node kNN
+    
+    Side effects:
+        Appends to state.temporal_graph (list of dicts per timestep):
+        - 'key_key_edges': (M_k, k) int tensor of neighbor indices
+        - 'key_key_weights': (M_k, k) float tensor of edge weights
+        - 'non_key_assignments': (M_n,) int tensor of assigned key-node indices
+        - 'non_key_weights': (M_n,) float tensor for DQB blending
+        - 'key_transforms': (M_k, 4, 4) SE(3) transforms (identity at t=0)
+    
+    Raises:
+        ValueError: If no key nodes exist or inconsistent state
+    """
+    
+    if not hasattr(state, 'temporal_graph'):
+        state.temporal_graph = []
+    
+    means3D = params['means3D'].detach()  # (N, 3)
+    N = means3D.shape[0]
+    
+    # Retrieve key mask for current timestep
+    if len(state.key_gaussians) == 0:
+        print(f"[temporal_graph] t={t}, no key nodes selected yet, skip")
+        return
+    
+    key_mask = state.key_gaussians[-1]  # (N,) bool
+    if isinstance(key_mask, torch.Tensor) and key_mask.device.type != 'cuda':
+        key_mask = key_mask.cuda()
+    
+    key_indices = torch.where(key_mask)[0]  # (M_k,)
+    non_key_indices = torch.where(~key_mask)[0]  # (M_n,)
+    
+    M_k = key_indices.shape[0]
+    M_n = non_key_indices.shape[0]
+    
+    if M_k == 0:
+        print(f"[temporal_graph] t={t}, no key nodes, skip")
+        return
+    
+    # ============================================================
+    # 1. Build key-key edges (UA-kNN, Eq. 7)
+    # ============================================================
+    
+    key_key_edges, key_key_weights = _build_key_key_edges(
+        means3D=means3D,
+        uncertainty_window=state.uncertainty_window,
+        key_indices=key_indices,
+        num_knn=num_knn,
+        output_params=output_params,
+    )
+    
+    # ============================================================
+    # 2. Build non-key assignments (Eq. 8)
+    # ============================================================
+    
+    non_key_assignments, non_key_weights = _assign_nonkey_to_key(
+        means3D=means3D,
+        uncertainty_window=state.uncertainty_window,
+        non_key_indices=non_key_indices,
+        key_indices=key_indices,
+        output_params=output_params,
+    )
+    
+    # ============================================================
+    # 3. Initialize SE(3) transforms (identity for key nodes)
+    # ============================================================
+    
+    key_transforms = torch.eye(4, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(M_k, 1, 1)
+    
+    # ============================================================
+    # Store in state
+    # ============================================================
+    
+    graph_dict = {
+        'timestep': t,
+        'key_indices': key_indices.cpu(),
+        'non_key_indices': non_key_indices.cpu(),
+        'key_key_edges': key_key_edges.cpu(),
+        'key_key_weights': key_key_weights.cpu(),
+        'non_key_assignments': non_key_assignments.cpu(),
+        'non_key_weights': non_key_weights.cpu(),
+        'key_transforms': key_transforms.cpu(),
+    }
+    
+    state.temporal_graph.append(graph_dict)
+    
+    print(
+        f"[temporal_graph] t={t}, "
+        f"key_nodes={M_k}, non_key_nodes={M_n}, "
+        f"key_edges={key_key_edges.shape[0]}×{key_key_edges.shape[1]}"
+    )
+
+
+def _build_key_key_edges(
+    means3D: torch.Tensor,
+    uncertainty_window: List[torch.Tensor],
+    key_indices: torch.Tensor,
+    num_knn: int = 5,
+    output_params: list = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Build key-key edges using Uncertainty-Aware kNN (Eq. 7).
+    
+    For each key node i, find k nearest key neighbors at its most reliable frame.
+    Distance is Mahalanobis-weighted by anisotropic uncertainty.
+    
+    Args:
+        means3D: (N, 3) Gaussian positions (current frame)
+        uncertainty_window: list of (N,) uncertainty tensors per timestep
+        key_indices: (M_k,) indices of key nodes
+        num_knn: Number of neighbors (k in paper)
+        output_params: list of saved params per timestep (for historical positions)
+    
+    Returns:
+        key_key_edges: (M_k, k) indices of neighbors (local to key_indices)
+        key_key_weights: (M_k, k) normalized edge weights
+    """
+    
+    M_k = key_indices.shape[0]
+    num_knn = min(num_knn, M_k - 1)  # Cannot have more neighbors than key nodes - 1
+    
+    if num_knn <= 0:
+        print("[_build_key_key_edges] Not enough key nodes for kNN")
+        return torch.zeros((M_k, 1), dtype=torch.long, device='cuda'), \
+               torch.ones((M_k, 1), dtype=torch.float32, device='cuda')
+    
+    # ---- Find most reliable frame t_hat for each key node ----
+    # t_hat = arg min_t { u_i,t }
+    
+    t_hat = torch.zeros(M_k, dtype=torch.long, device='cuda')
+    
+    if len(uncertainty_window) > 0:
+        unc_stack = torch.stack(uncertainty_window, dim=1)  # (N, T_window) on CPU
+        for i, g_idx in enumerate(key_indices):
+            g_idx_cpu = g_idx.item() if g_idx.is_cuda else g_idx
+            if g_idx_cpu < unc_stack.shape[0]:
+                t_hat[i] = torch.argmin(unc_stack[g_idx_cpu])
+            else:
+                t_hat[i] = 0
+    
+    # ---- Get positions at most reliable frames ----
+    # Extract from output_params if available (contains historical positions)
+    # output_params[0] = t=0 (all params), output_params[1:] = t=1+ (means3D only)
+    
+    if output_params and len(output_params) >= 2:
+        # Use last available timestep positions from output_params
+        # (Could use t_hat per node, but simplified for now)
+        last_idx = len(output_params) - 1
+        pos_at_t = torch.tensor(output_params[last_idx]['means3D']).cuda()  # (N, 3)
+        pts_key = pos_at_t[key_indices]  # (M_k, 3)
+    else:
+        # Fallback to current frame
+        pts_key = means3D[key_indices]  # (M_k, 3)
+    
+    # ---- Compute pairwise distances ----
+    # Full version: Mahalanobis with uncertainty weighting (Eq. 7)
+    # Simplified: L2 distance with exponential weighting
+    
+    dists = torch.cdist(pts_key, pts_key, p=2)  # (M_k, M_k)
+    
+    # Add uncertainty-based weighting if available
+    if len(uncertainty_window) > 0:
+        unc_stack = torch.stack(uncertainty_window, dim=1)  # (N, T_window) on CPU
+        # Mean uncertainty for each key node
+        unc_key = unc_stack[key_indices.cpu()].mean(dim=1).cuda()  # (M_k,)
+        # Pairwise uncertainty sum: U_i + U_j
+        unc_pair = unc_key.unsqueeze(1) + unc_key.unsqueeze(0)  # (M_k, M_k)
+        # Weight distances by uncertainty (higher unc = larger effective distance)
+        dists = dists * torch.sqrt(1.0 + unc_pair.clamp(min=0))
+    
+    # Mask out self-distances
+    dists.fill_diagonal_(float('inf'))
+    
+    # kNN: select k smallest neighbors per node
+    neighbor_dists, neighbor_local_indices = torch.topk(dists, k=num_knn, dim=1, largest=False)
+    
+    # Convert distances to weights (exponential decay)
+    neighbor_weights = torch.exp(-neighbor_dists.clamp(min=1e-8))
+    
+    # Normalize weights per node
+    neighbor_weights = neighbor_weights / (neighbor_weights.sum(dim=1, keepdim=True) + 1e-8)
+    
+    return neighbor_local_indices.long(), neighbor_weights.float()
+
+
+def _assign_nonkey_to_key(
+    means3D: torch.Tensor,
+    uncertainty_window: List[torch.Tensor],
+    non_key_indices: torch.Tensor,
+    key_indices: torch.Tensor,
+    output_params: list = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Assign each non-key node to its closest key node across entire sequence (Eq. 8).
+    
+    For each non-key node i:
+        j = arg min_{l in Vk} sum_{t=0}^{T-1} ||p_i,t - p_l,t||_{U_weighted}
+    
+    Args:
+        means3D: (N, 3) Gaussian positions (current frame)
+        uncertainty_window: list of (N,) uncertainty tensors per timestep
+        non_key_indices: (M_n,) indices of non-key nodes
+        key_indices: (M_k,) indices of key nodes
+        output_params: list of saved params per timestep (for historical positions)
+    
+    Returns:
+        assignments: (M_n,) local index into key_indices of assigned key node
+        weights: (M_n,) normalized weights for DQB blending
+    """
+    
+    M_n = non_key_indices.shape[0]
+    M_k = key_indices.shape[0]
+    
+    if M_n == 0 or M_k == 0:
+        return torch.zeros((M_n,), dtype=torch.long, device='cuda'), \
+               torch.ones((M_n,), dtype=torch.float32, device='cuda')
+    
+    # ---- Temporal accumulation of distances (Eq. 8) ----
+    # sum_{t=0}^{T-1} ||p_i,t - p_l,t||
+    
+    if output_params and len(output_params) >= 2:
+        # Full temporal accumulation across all saved timesteps
+        # output_params[0] = t=0, output_params[1:] = t=1+
+        total_dists = None
+        
+        for idx, p in enumerate(output_params[1:], start=1):  # Skip t=0 (has all params)
+            pos_t = torch.tensor(p['means3D']).cuda()  # (N, 3)
+            pts_nonkey_t = pos_t[non_key_indices]  # (M_n, 3)
+            pts_key_t = pos_t[key_indices]  # (M_k, 3)
+            
+            dists_t = torch.cdist(pts_nonkey_t, pts_key_t, p=2)  # (M_n, M_k)
+            
+            # Uncertainty weighting (if available in window)
+            # Note: uncertainty_window may be shorter than output_params
+            window_idx = idx - 1  # Adjust for window indexing
+            if window_idx < len(uncertainty_window):
+                unc_t = uncertainty_window[window_idx].cuda()  # (N,)
+                unc_nonkey = unc_t[non_key_indices.cpu()].cuda().unsqueeze(1)  # (M_n, 1)
+                unc_key = unc_t[key_indices.cpu()].cuda().unsqueeze(0)  # (1, M_k)
+                unc_pair = unc_nonkey + unc_key  # (M_n, M_k)
+                dists_t = dists_t * torch.sqrt(1.0 + unc_pair.clamp(min=0))
+            
+            if total_dists is None:
+                total_dists = dists_t
+            else:
+                total_dists = total_dists + dists_t
+        
+        # Average distance across timesteps
+        if total_dists is not None:
+            dists = total_dists / (len(output_params) - 1)
+        else:
+            # Fallback if no historical data
+            pts_nonkey = means3D[non_key_indices]
+            pts_key = means3D[key_indices]
+            dists = torch.cdist(pts_nonkey, pts_key, p=2)
+    else:
+        # Use current positions as fallback
+        pts_nonkey = means3D[non_key_indices]  # (M_n, 3)
+        pts_key = means3D[key_indices]  # (M_k, 3)
+        dists = torch.cdist(pts_nonkey, pts_key, p=2)  # (M_n, M_k)
+    
+    # Find closest key node per non-key node
+    min_dists, assignments = torch.min(dists, dim=1)  # (M_n,)
+    
+    # Convert distances to weights (exponential decay)
+    weights = torch.exp(-min_dists.clamp(min=1e-8))
+    
+    # Normalize (all non-keys have normalized weight = 1.0 to their single assigned key)
+    weights = weights / (weights + 1e-8)
+    
+    return assignments.long(), weights.float()
+
+
+def get_temporal_graph_at_t(state: TemporalState, t: int) -> Dict:
+    """
+    Retrieve temporal graph dict for timestep t.
+    
+    Args:
+        state: TemporalState
+        t: Timestep index
+    
+    Returns:
+        Dict with keys: key_indices, non_key_indices, key_key_edges,
+                        key_key_weights, non_key_assignments, non_key_weights,
+                        key_transforms
+        Returns None if no graph at this timestep
+    """
+    
+    if not hasattr(state, 'temporal_graph') or len(state.temporal_graph) == 0:
+        return None
+    
+    for graph_dict in state.temporal_graph:
+        if graph_dict['timestep'] == t:
+            return graph_dict
+    
+    return None

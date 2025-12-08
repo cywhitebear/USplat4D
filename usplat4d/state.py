@@ -41,5 +41,8 @@ class TemporalState:
     init_bg_pts: torch.Tensor = None
     init_bg_rot: torch.Tensor = None
 
+    # ---- temporal graph (USplat4D §4.2(b)) ----
+    temporal_graph: list = field(default_factory=list)         # list of dicts per timestep
+
     # ---- debug flags ----
     saved_uncertainty_debug: bool = False

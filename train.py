@@ -15,6 +15,7 @@ from usplat4d.state import TemporalState
 from usplat4d.uncertainty_overlay_pil import overlay_uncertainty_on_image_pil
 from usplat4d.uncertainty_window import update_uncertainty_window
 from usplat4d.keynode_selection import select_key_nodes_from_window
+from usplat4d.temporal_graph import build_temporal_graph
 
 
 def get_dataset(t, md, seq):
@@ -345,7 +346,7 @@ def train(seq, exp):
                 optimizer.zero_grad(set_to_none=True)
         progress_bar.close()
 
-        # ---- Stage 5: summarize uncertainty + key-node selection ----
+        # ---- Stage 5: summarize uncertainty + key-node selection + temporal graph ----
         if not is_initial_timestep and len(state.curr_uncertainty) > 0:
             u_stack = torch.stack(state.curr_uncertainty, dim=0)  # (num_iters, N)
             u_mean = u_stack.mean(0)                              # (N,)
@@ -364,6 +365,15 @@ def train(seq, exp):
                 T_min=5,
                 quantile=0.02,
                 voxel_ratio=0.05,
+            )
+
+            # Build temporal graph after key-node selection
+            build_temporal_graph(
+                params=params,
+                state=state,
+                output_params=output_params,
+                t=t,
+                num_knn=5,
             )
 
         state.curr_uncertainty = []
