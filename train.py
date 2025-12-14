@@ -16,6 +16,7 @@ from usplat4d.uncertainty_overlay_pil import overlay_uncertainty_on_image_pil
 from usplat4d.uncertainty_window import update_uncertainty_window
 from usplat4d.keynode_selection import select_key_nodes_from_window
 from usplat4d.temporal_graph import build_temporal_graph
+from usplat4d.visualize_graph import visualize_graph_on_image
 
 
 def get_dataset(t, md, seq):
@@ -375,6 +376,42 @@ def train(seq, exp):
                 t=t,
                 num_knn=5,
             )
+            
+            # Visualize graph (key vs non-key nodes) on first camera view
+            if len(state.temporal_graph) > 0 and t > 1:  # After at least 2 non-initial timesteps
+                with torch.no_grad():
+                    graph = state.temporal_graph[-1]
+                    key_mask_full = torch.zeros(params['means3D'].shape[0], dtype=torch.bool)
+                    key_mask_full[graph['key_indices']] = True
+                    
+                    # Render current frame for visualization
+                    rendervar = params2rendervar(params)
+                    im_vis, radius_vis, _ = Renderer(raster_settings=dataset[0]['cam'])(**rendervar)
+                    curr_id = dataset[0]['id']
+                    im_vis = torch.exp(params['cam_m'][curr_id])[:, None, None] * im_vis + params['cam_c'][curr_id][:, None, None]
+                    
+                    # Project to 2D
+                    pts_world = params["means3D"]
+                    N = pts_world.shape[0]
+                    ones = torch.ones((N, 1), device=pts_world.device)
+                    pts_h = torch.cat([pts_world, ones], dim=1)
+                    w2c = dataset[0]["w2c"]
+                    pts_cam = (w2c @ pts_h.T).T
+                    K = dataset[0]["K"]
+                    u = K[0, 0] * (pts_cam[:, 0] / pts_cam[:, 2].clamp(min=1e-6)) + K[0, 2]
+                    v = K[1, 1] * (pts_cam[:, 1] / pts_cam[:, 2].clamp(min=1e-6)) + K[1, 2]
+                    centers2d = torch.stack([u, v], dim=1)
+                    
+                    rendered_np = im_vis.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
+                    graph_vis_path = f"./output/graph_vis_t{t:02d}.png"
+                    visualize_graph_on_image(
+                        image_np=rendered_np,
+                        centers2d=centers2d,
+                        key_mask=key_mask_full,
+                        radii_px=radius_vis,
+                        out_path=graph_vis_path,
+                    )
+                    print(f"[USplat4D] Graph visualization saved: {graph_vis_path}")
 
         state.curr_uncertainty = []
 
@@ -396,8 +433,7 @@ def train(seq, exp):
 
 
 if __name__ == "__main__":
-    exp_name = "exp_uncertainty_1"
-    # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
+    exp_name = "exp_graph_test"
     datasets = ["basketball"]
     for sequence in datasets:
         train(sequence, exp_name)
