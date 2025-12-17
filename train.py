@@ -17,6 +17,11 @@ from usplat4d.uncertainty_window import update_uncertainty_window
 from usplat4d.keynode_selection import select_key_nodes_from_window
 from usplat4d.temporal_graph import build_temporal_graph
 from usplat4d.visualize_graph import visualize_graph_on_image
+from usplat4d.motion_optimization import (
+    compute_key_node_loss,
+    compute_non_key_loss,
+    compute_motion_regularization_loss,
+)
 
 
 def get_dataset(t, md, seq):
@@ -99,6 +104,31 @@ def initialize_optimizer(params, state: TemporalState):
     }
     param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+
+
+def add_transform_parameters_to_optimizer(optimizer, state: TemporalState, lr=0.001):
+    """
+    Add SE(3) transform parameters from temporal graph to optimizer.
+    
+    Called after graph construction to enable transform optimization.
+    """
+    if len(state.temporal_graph) == 0:
+        return
+    
+    for graph_dict in state.temporal_graph:
+        key_transforms = graph_dict['key_transforms']
+        if isinstance(key_transforms, torch.nn.Parameter):
+            # Check if already in optimizer
+            param_in_optimizer = any(
+                key_transforms is group['params'][0] 
+                for group in optimizer.param_groups
+            )
+            if not param_in_optimizer:
+                optimizer.add_param_group({
+                    'params': [key_transforms],
+                    'name': f"key_transforms_t{graph_dict['timestep']}",
+                    'lr': lr,
+                })
 
 
 def compute_photometric_uncertainty(params, curr_data, im):
@@ -217,7 +247,38 @@ def get_loss(params, curr_data, state: TemporalState, is_initial_timestep):
 
         losses["soft_col_cons"] = l1_loss_v2(params["rgb_colors"], state.prev_col)
 
-    # 5) aggregate losses and update visibility statistics
+    # 5) Motion optimization losses (USplat4D §4.3)
+    if not is_initial_timestep and len(state.temporal_graph) > 0:
+        # Get the latest temporal graph
+        graph_dict = state.temporal_graph[-1]
+        
+        # Key node loss (Eq. 9)
+        if hasattr(state, 'init_params') and state.init_params is not None:
+            losses["motion_key"] = compute_key_node_loss(
+                params=params,
+                state=state,
+                graph_dict=graph_dict,
+                init_params=state.init_params,
+                t=len(state.temporal_graph) - 1,
+            )
+        
+        # Non-key node loss (Eq. 11)
+        losses["motion_non_key"] = compute_non_key_loss(
+            params=params,
+            state=state,
+            graph_dict=graph_dict,
+            init_params=state.init_params,
+            t=len(state.temporal_graph) - 1,
+        )
+        
+        # Motion regularization (smooth SE(3) transforms)
+        losses["motion_reg"] = compute_motion_regularization_loss(
+            params=params,
+            state=state,
+            graph_dict=graph_dict,
+        )
+    
+    # 6) aggregate losses and update visibility statistics
     loss_weights = {
         "im": 1.0,
         "seg": 3.0,
@@ -227,8 +288,11 @@ def get_loss(params, curr_data, state: TemporalState, is_initial_timestep):
         "floor": 2.0,
         "bg": 20.0,
         "soft_col_cons": 0.01,
+        "motion_key": 1.0,
+        "motion_non_key": 0.5,
+        "motion_reg": 0.1,
     }
-    loss = sum(loss_weights[k] * v for k, v in losses.items())
+    loss = sum(loss_weights.get(k, 0) * v for k, v in losses.items())
 
     seen = radius > 0
     state.max_2D_radius[seen] = torch.max(radius[seen], state.max_2D_radius[seen])
@@ -310,9 +374,18 @@ def train(seq, exp):
     params, state = initialize_params(seq, md)
     optimizer = initialize_optimizer(params, state)
     output_params = []
+    
+    # Store initial params for motion optimization reference (§4.3, Eq. 9)
+    state.init_params = {k: v.detach().clone() for k, v in params.items()}
 
     # 2) temporal containers are already in TemporalState by default
 
+    # Detect if monocular or multi-view based on number of cameras
+    num_cameras = len(md['fn'][0])  # Number of cameras at timestep 0
+    is_monocular = (num_cameras == 1)
+    state.is_monocular = is_monocular  # Store in state for later use
+    print(f"[init] Detected {'monocular' if is_monocular else 'multi-view'} setup with {num_cameras} cameras")
+    
     for t in range(num_timesteps):
         # ---- Stage 1: load dataset for timestep t ----
         dataset = get_dataset(t, md, seq)
@@ -369,13 +442,23 @@ def train(seq, exp):
             )
 
             # Build temporal graph after key-node selection
+            # Extract camera rotation from first camera's w2c matrix
+            w2c = dataset[0]['w2c']  # [4, 4] world-to-camera
+            c2w = torch.inverse(w2c)  # [4, 4] camera-to-world
+            camera_rotation = c2w[:3, :3]  # [3, 3] rotation only
+            
             build_temporal_graph(
                 params=params,
                 state=state,
                 output_params=output_params,
                 t=t,
                 num_knn=5,
+                camera_rotation=camera_rotation,
+                is_monocular=is_monocular,
             )
+            
+            # Add transform parameters to optimizer for motion optimization
+            add_transform_parameters_to_optimizer(optimizer, state, lr=0.001)
             
             # Visualize graph (key vs non-key nodes) on first camera view
             if len(state.temporal_graph) > 0 and t > 1:  # After at least 2 non-initial timesteps
@@ -433,7 +516,7 @@ def train(seq, exp):
 
 
 if __name__ == "__main__":
-    exp_name = "exp_graph_test"
+    exp_name = "exp_motion_opt_test"
     datasets = ["basketball"]
     for sequence in datasets:
         train(sequence, exp_name)

@@ -50,8 +50,8 @@ def overlay_uncertainty_on_image_pil(
         # semi-transparent fill
         draw.ellipse(
             (xi - rr, yi - rr, xi + rr, yi + rr),
-            fill=color + (1,),   # RGBA, alpha=100 for transparency
-            outline=color + (4,)
+            fill=color + (2,),   # alpha
+            outline=color + (0,)
         )
 
     pil_img.save(out_path)

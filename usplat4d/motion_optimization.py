@@ -137,14 +137,27 @@ def compute_key_node_loss(
     M_k = key_indices.shape[0]
     
     if M_k == 0:
-        return torch.tensor(0.0, device='cuda')
+        return torch.tensor(0.0, device='cuda', requires_grad=True)
     
     # Current and initial positions
     p_curr = params['means3D'][key_indices]  # (M_k, 3)
-    p_init = init_params['means3D'][key_indices]  # (M_k, 3)
+    
+    # Handle case where new Gaussians were added (not in init_params)
+    N_init = init_params['means3D'].shape[0]
+    key_indices_cpu = key_indices.cpu()
+    valid_init_mask = key_indices_cpu < N_init
+    
+    if not valid_init_mask.any():
+        # All key nodes are newly added, skip this loss
+        return torch.tensor(0.0, device='cuda', requires_grad=True)
+    
+    # Only compute loss for Gaussians that existed at initialization
+    valid_key_indices = key_indices[valid_init_mask]
+    p_curr_valid = p_curr[valid_init_mask]
+    p_init = init_params['means3D'][valid_key_indices]  # (M_k_valid, 3)
     
     # Position deviation
-    deviation = p_curr - p_init  # (M_k, 3)
+    deviation = p_curr_valid - p_init  # (M_k_valid, 3)
     
     # Uncertainty weighting: U^-1 down-weights high-uncertainty directions
     # Simplified: use scalar uncertainty as isotropic weighting
@@ -152,21 +165,29 @@ def compute_key_node_loss(
         # Get uncertainty for key nodes at current window position
         window_idx = min(t - 1, len(state.uncertainty_window) - 1)
         if window_idx >= 0:
-            unc = state.uncertainty_window[window_idx].cuda()  # (N,)
-            unc_key = unc[key_indices.cpu()].cuda()  # (M_k,)
-            # Inverse uncertainty weighting (lower unc = higher weight)
-            weights = 1.0 / (unc_key + 1e-6)  # (M_k,)
+            unc = state.uncertainty_window[window_idx].cuda()  # (N_old,)
+            # Check if valid indices are within uncertainty bounds
+            valid_key_indices_cpu = valid_key_indices.cpu()
+            valid_unc_mask = valid_key_indices_cpu < unc.shape[0]
+            if valid_unc_mask.any():
+                valid_unc_indices = valid_key_indices_cpu[valid_unc_mask]
+                unc_key = torch.ones(valid_key_indices.shape[0], device='cuda')
+                unc_key[valid_unc_mask] = unc[valid_unc_indices].cuda()
+                weights = 1.0 / (unc_key + 1e-6)
+            else:
+                weights = torch.ones(valid_key_indices.shape[0], device='cuda')
         else:
-            weights = torch.ones(M_k, device='cuda')
+            weights = torch.ones(valid_key_indices.shape[0], device='cuda')
     else:
-        weights = torch.ones(M_k, device='cuda')
+        weights = torch.ones(valid_key_indices.shape[0], device='cuda')
     
     # Weighted L2 loss
-    position_loss = (weights.unsqueeze(-1) * deviation ** 2).sum() / M_k
+    M_k_valid = valid_key_indices.shape[0]
+    position_loss = (weights.unsqueeze(-1) * deviation ** 2).sum() / M_k_valid
     
     # L_motion,key: isometry, rigidity, rotation constraints
     # For now, return just position loss (TODO: add motion constraints)
-    motion_loss = torch.tensor(0.0, device='cuda')
+    motion_loss = torch.zeros(1, device='cuda', requires_grad=True)[0]
     
     return position_loss + motion_loss
 
@@ -198,30 +219,43 @@ def compute_non_key_loss(
     M_n = non_key_indices.shape[0]
     
     if M_n == 0:
-        return torch.tensor(0.0, device='cuda')
+        return torch.tensor(0.0, device='cuda', requires_grad=True)
     
     # Current and initial positions
     p_curr = params['means3D'][non_key_indices]  # (M_n, 3)
-    p_init = init_params['means3D'][non_key_indices]  # (M_n, 3)
     
-    # Deviation from initialization
-    deviation_init = p_curr - p_init  # (M_n, 3)
+    # Handle new Gaussians not in init_params
+    N_init = init_params['means3D'].shape[0]
+    nonkey_indices_cpu = non_key_indices.cpu()
+    valid_init_mask = nonkey_indices_cpu < N_init
+    
+    # Deviation from initialization (only for original Gaussians)
+    if valid_init_mask.any():
+        valid_nonkey_for_init = non_key_indices[valid_init_mask]
+        p_init = init_params['means3D'][valid_nonkey_for_init]
+        deviation_init = p_curr[valid_init_mask] - p_init
+    else:
+        deviation_init = torch.zeros_like(p_curr[:1])  # Dummy for gradient
     
     # DQB interpolation from key nodes
     # For now, use simple assignment (TODO: implement full DQB)
     key_indices = graph_dict['key_indices'].cuda()
     assignments = graph_dict['non_key_assignments'].cuda()  # (M_n,) local indices
     key_transforms = graph_dict['key_transforms'].cuda()  # (M_k, 4, 4)
+    M_k = key_indices.shape[0]
+    
+    # Clamp assignments to valid range
+    assignments = torch.clamp(assignments, 0, M_k - 1)
     
     # Get assigned key node transforms
     assigned_transforms = key_transforms[assignments]  # (M_n, 4, 4)
     
-    # Apply transforms to get DQB positions
-    p_dqb = torch.zeros_like(p_curr)
-    for i in range(M_n):
-        T = assigned_transforms[i]
-        p_old = p_init[i]
-        p_dqb[i] = T[:3, :3] @ p_old + T[:3, 3]
+    # Apply transforms to current positions (vectorized)
+    # T @ p + t for each: [R|t] @ [p; 1]
+    R = assigned_transforms[:, :3, :3]  # (M_n, 3, 3)
+    trans = assigned_transforms[:, :3, 3]   # (M_n, 3) - translation vectors
+    # Batch matrix multiply: (M_n, 3, 3) @ (M_n, 3, 1) -> (M_n, 3, 1)
+    p_dqb = torch.bmm(R, p_curr.unsqueeze(-1)).squeeze(-1) + trans  # (M_n, 3)
     
     deviation_dqb = p_curr - p_dqb  # (M_n, 3)
     
@@ -230,19 +264,32 @@ def compute_non_key_loss(
         window_idx = min(t - 1, len(state.uncertainty_window) - 1)
         if window_idx >= 0:
             unc = state.uncertainty_window[window_idx].cuda()
-            unc_nonkey = unc[non_key_indices.cpu()].cuda()
-            weights = 1.0 / (unc_nonkey + 1e-6)
+            # Check bounds
+            nonkey_indices_cpu = non_key_indices.cpu()
+            valid_mask = nonkey_indices_cpu < unc.shape[0]
+            if valid_mask.any():
+                valid_indices = nonkey_indices_cpu[valid_mask]
+                unc_nonkey = torch.ones(M_n, device='cuda')
+                unc_nonkey[valid_mask] = unc[valid_indices].cuda()
+                weights = 1.0 / (unc_nonkey + 1e-6)
+            else:
+                weights = torch.ones(M_n, device='cuda')
         else:
             weights = torch.ones(M_n, device='cuda')
     else:
         weights = torch.ones(M_n, device='cuda')
     
     # Weighted losses
-    init_loss = (weights.unsqueeze(-1) * deviation_init ** 2).sum() / M_n
+    if valid_init_mask.any():
+        M_n_valid = valid_init_mask.sum().item()
+        init_loss = (weights[valid_init_mask].unsqueeze(-1) * deviation_init ** 2).sum() / M_n_valid
+    else:
+        init_loss = torch.zeros(1, device='cuda', requires_grad=True)[0]
+    
     dqb_loss = (weights.unsqueeze(-1) * deviation_dqb ** 2).sum() / M_n
     
     # Motion loss (placeholder)
-    motion_loss = torch.tensor(0.0, device='cuda')
+    motion_loss = torch.zeros(1, device='cuda', requires_grad=True)[0]
     
     return init_loss + dqb_loss + motion_loss
 
@@ -272,23 +319,27 @@ def compute_motion_regularization_loss(
     
     M_k = key_indices.shape[0]
     if M_k == 0:
-        return torch.tensor(0.0, device='cuda')
+        return torch.tensor(0.0, device='cuda', requires_grad=True)
     
     # Get key node positions
     positions = params['means3D'][key_indices]  # (M_k, 3)
     
-    # Compute motion smoothness over edges
-    loss = torch.tensor(0.0, device='cuda')
+    # Compute motion smoothness over edges (vectorized)
+    # For each key node, compute weighted distance to its k neighbors
+    # positions[i] - positions[edges[i, j]] weighted by weights[i, j]
     
-    for i in range(M_k):
-        p_i = positions[i]  # (3,)
-        neighbors = key_key_edges[i]  # (k,) local indices
-        weights = key_key_weights[i]  # (k,)
-        
-        for j_local, w in zip(neighbors, weights):
-            if j_local < M_k:  # Valid neighbor
-                p_j = positions[j_local]
-                # Penalize position difference
-                loss += w * ((p_i - p_j) ** 2).sum()
+    # Gather neighbor positions: (M_k, k, 3)
+    k = key_key_edges.shape[1]
+    valid_edges = torch.clamp(key_key_edges, 0, M_k - 1)  # Clamp to valid range
+    neighbor_positions = positions[valid_edges]  # (M_k, k, 3)
     
-    return loss / (M_k + 1e-6)
+    # Compute differences: (M_k, k, 3)
+    pos_diff = positions.unsqueeze(1) - neighbor_positions  # (M_k, 1, 3) - (M_k, k, 3)
+    
+    # Weighted squared differences: (M_k, k)
+    weighted_sq_diff = key_key_weights * (pos_diff ** 2).sum(dim=-1)
+    
+    # Sum over all edges
+    loss = weighted_sq_diff.sum() / (M_k + 1e-6)
+    
+    return loss

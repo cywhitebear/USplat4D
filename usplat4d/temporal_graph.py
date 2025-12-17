@@ -8,8 +8,13 @@ encoding spatial affinity and motion similarity.
 
 import torch
 import numpy as np
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Optional
 from .state import TemporalState
+from .uncertainty import (
+    transform_to_anisotropic,
+    compute_mahalanobis_distance,
+    invert_covariance_safe,
+)
 
 
 def build_temporal_graph(
@@ -18,6 +23,8 @@ def build_temporal_graph(
     output_params: list,
     t: int,
     num_knn: int = 5,
+    camera_rotation: Optional[torch.Tensor] = None,
+    is_monocular: Optional[bool] = None,
 ) -> None:
     """
     Construct temporal graph encoding edges between key and non-key nodes.
@@ -32,6 +39,10 @@ def build_temporal_graph(
         output_params: List of saved params per timestep (for historical positions)
         t: Current timestep
         num_knn: Number of neighbors for key-node kNN
+        camera_rotation: [3, 3] camera-to-world rotation for anisotropic uncertainty (Eq. 6)
+                        If None, uses identity (isotropic)
+        is_monocular: If True, uses (1,1,5) for depth scaling; if False, uses (1,1,1)
+                     If None, auto-detects from number of cameras in training
     
     Side effects:
         Appends to state.temporal_graph (list of dicts per timestep):
@@ -74,12 +85,22 @@ def build_temporal_graph(
     # 1. Build key-key edges (UA-kNN, Eq. 7)
     # ============================================================
     
+    # Auto-detect monocular if not specified (stored in state or inferred)
+    if is_monocular is None:
+        is_monocular = getattr(state, 'is_monocular', True)  # Default to monocular
+    
+    # Use identity camera rotation if not provided
+    if camera_rotation is None:
+        camera_rotation = torch.eye(3, device='cuda', dtype=torch.float32)
+    
     key_key_edges, key_key_weights = _build_key_key_edges(
         means3D=means3D,
         uncertainty_window=state.uncertainty_window,
         key_indices=key_indices,
         num_knn=num_knn,
         output_params=output_params,
+        camera_rotation=camera_rotation,
+        is_monocular=is_monocular,
     )
     
     # ============================================================
@@ -98,7 +119,9 @@ def build_temporal_graph(
     # 3. Initialize SE(3) transforms (identity for key nodes)
     # ============================================================
     
+    # Make transforms optimizable parameters (keep on GPU)
     key_transforms = torch.eye(4, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(M_k, 1, 1)
+    key_transforms = torch.nn.Parameter(key_transforms.clone(), requires_grad=True)
     
     # ============================================================
     # Store in state
@@ -106,13 +129,13 @@ def build_temporal_graph(
     
     graph_dict = {
         'timestep': t,
-        'key_indices': key_indices.cpu(),
-        'non_key_indices': non_key_indices.cpu(),
-        'key_key_edges': key_key_edges.cpu(),
-        'key_key_weights': key_key_weights.cpu(),
-        'non_key_assignments': non_key_assignments.cpu(),
-        'non_key_weights': non_key_weights.cpu(),
-        'key_transforms': key_transforms.cpu(),
+        'key_indices': key_indices,  # Keep on GPU for optimization
+        'non_key_indices': non_key_indices,
+        'key_key_edges': key_key_edges,
+        'key_key_weights': key_key_weights,
+        'non_key_assignments': non_key_assignments,
+        'non_key_weights': non_key_weights,
+        'key_transforms': key_transforms,  # Optimizable parameter
     }
     
     state.temporal_graph.append(graph_dict)
@@ -130,12 +153,14 @@ def _build_key_key_edges(
     key_indices: torch.Tensor,
     num_knn: int = 5,
     output_params: list = None,
+    camera_rotation: Optional[torch.Tensor] = None,
+    is_monocular: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Build key-key edges using Uncertainty-Aware kNN (Eq. 7).
     
     For each key node i, find k nearest key neighbors at its most reliable frame.
-    Distance is Mahalanobis-weighted by anisotropic uncertainty.
+    Distance is Mahalanobis-weighted by anisotropic uncertainty (Eq. 6).
     
     Args:
         means3D: (N, 3) Gaussian positions (current frame)
@@ -143,6 +168,8 @@ def _build_key_key_edges(
         key_indices: (M_k,) indices of key nodes
         num_knn: Number of neighbors (k in paper)
         output_params: list of saved params per timestep (for historical positions)
+        camera_rotation: [3, 3] camera-to-world rotation for Eq. 6
+        is_monocular: If True, uses (1,1,5) depth scaling; else (1,1,1)
     
     Returns:
         key_key_edges: (M_k, k) indices of neighbors (local to key_indices)
@@ -185,21 +212,31 @@ def _build_key_key_edges(
         # Fallback to current frame
         pts_key = means3D[key_indices]  # (M_k, 3)
     
-    # ---- Compute pairwise distances ----
-    # Full version: Mahalanobis with uncertainty weighting (Eq. 7)
-    # Simplified: L2 distance with exponential weighting
+    # ---- Compute pairwise Mahalanobis distances (Eq. 7) ----
+    # Transform scalar uncertainty to anisotropic covariance (Eq. 6)
     
-    dists = torch.cdist(pts_key, pts_key, p=2)  # (M_k, M_k)
-    
-    # Add uncertainty-based weighting if available
-    if len(uncertainty_window) > 0:
+    if len(uncertainty_window) > 0 and camera_rotation is not None:
         unc_stack = torch.stack(uncertainty_window, dim=1)  # (N, T_window) on CPU
         # Mean uncertainty for each key node
         unc_key = unc_stack[key_indices.cpu()].mean(dim=1).cuda()  # (M_k,)
-        # Pairwise uncertainty sum: U_i + U_j
-        unc_pair = unc_key.unsqueeze(1) + unc_key.unsqueeze(0)  # (M_k, M_k)
-        # Weight distances by uncertainty (higher unc = larger effective distance)
-        dists = dists * torch.sqrt(1.0 + unc_pair.clamp(min=0))
+        
+        # Transform to anisotropic covariance matrices (Eq. 6)
+        cov_key = transform_to_anisotropic(
+            uncertainty=unc_key,
+            positions=pts_key,
+            camera_rotation=camera_rotation,
+            is_monocular=is_monocular,
+        )  # (M_k, 3, 3)
+        
+        # Invert covariance for Mahalanobis distance
+        cov_inv_key = invert_covariance_safe(cov_key)  # (M_k, 3, 3)
+        
+        # Compute Mahalanobis distances: d²(i,j) = (x_i - x_j)^T U_i^{-1} (x_i - x_j)
+        dists = compute_mahalanobis_distance(pts_key, pts_key, cov_inv_key)  # (M_k, M_k)
+        
+    else:
+        # Fallback: simple L2 distance if no uncertainty available
+        dists = torch.cdist(pts_key, pts_key, p=2) ** 2  # (M_k, M_k), squared for consistency
     
     # Mask out self-distances
     dists.fill_diagonal_(float('inf'))
