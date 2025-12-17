@@ -15,6 +15,7 @@ from usplat4d.state import TemporalState
 from usplat4d.uncertainty_overlay_pil import overlay_uncertainty_on_image_pil
 from usplat4d.uncertainty_window import update_uncertainty_window
 from usplat4d.keynode_selection import select_key_nodes_from_window
+from usplat4d.uncertainty import compute_gaussian_uncertainty
 from usplat4d.temporal_graph import build_temporal_graph
 from usplat4d.visualize_graph import visualize_graph_on_image
 from usplat4d.motion_optimization import (
@@ -131,69 +132,97 @@ def add_transform_parameters_to_optimizer(optimizer, state: TemporalState, lr=0.
                 })
 
 
-def compute_photometric_uncertainty(params, curr_data, im):
+def compute_centers2d(params, curr_data):
     """
-    Project Gaussians to the image, sample RGB, and compute
-    per-Gaussian L1 photometric residual.
+    Project Gaussians to 2D for visualization purposes.
     """
-    pts_world = params["means3D"]  # (N,3)
+    pts_world = params["means3D"]
     N = pts_world.shape[0]
-
     ones = torch.ones((N, 1), device=pts_world.device)
-    pts_h = torch.cat([pts_world, ones], dim=1)  # (N,4)
-
-    w2c = curr_data["w2c"]  # (4,4)
+    pts_h = torch.cat([pts_world, ones], dim=1)
+    w2c = curr_data["w2c"]
     pts_cam = (w2c @ pts_h.T).T
-    Xc = pts_cam[:, 0]
-    Yc = pts_cam[:, 1]
-    Zc = pts_cam[:, 2].clamp(min=1e-6)
-
     K = curr_data["K"]
-    fx = K[0, 0]
-    fy = K[1, 1]
-    cx = K[0, 2]
-    cy = K[1, 2]
-
-    u = fx * (Xc / Zc) + cx
-    v = fy * (Yc / Zc) + cy
-
-    H = curr_data["height"]
-    W = curr_data["width"]
-    u_clamped = u.clamp(0, W - 1).long()
-    v_clamped = v.clamp(0, H - 1).long()
-
-    pred_rgb = im[:, v_clamped, u_clamped].permute(1, 0)  # (N,3)
-    gt_rgb = curr_data["im"][:, v_clamped, u_clamped].permute(1, 0)
-
-    uncertainty = torch.abs(pred_rgb - gt_rgb).mean(dim=1)  # (N,)
-    centers2d_px = torch.stack([u, v], dim=1)  # (N,2)
-    return uncertainty, centers2d_px
+    u = K[0, 0] * (pts_cam[:, 0] / pts_cam[:, 2].clamp(min=1e-6)) + K[0, 2]
+    v = K[1, 1] * (pts_cam[:, 1] / pts_cam[:, 2].clamp(min=1e-6)) + K[1, 2]
+    return torch.stack([u, v], dim=1)
 
 
-def get_loss(params, curr_data, state: TemporalState, is_initial_timestep):
+def get_loss(params, curr_data, state: TemporalState, is_initial_timestep, t=None):
     losses = {}
 
-    # 1) render RGB
+    # 1) render RGB with paper-faithful uncertainty outputs (USplat4D §4.1, Eq. 2-3)
     rendervar = params2rendervar(params)
     rendervar["means2D"].retain_grad()
-    im, radius, _, = Renderer(raster_settings=curr_data["cam"])(**rendervar)
+    
+    # Modified rasterizer returns: (color, radius, depth, gaussian_ids, transmittance_alpha)
+    render_outputs = Renderer(raster_settings=curr_data["cam"])(**rendervar)
+    
+    # Unpack outputs - check if rasterizer is modified (5 outputs) or not (3 outputs)
+    if len(render_outputs) == 5:
+        im, radius, depth, gaussian_ids, transmittance_alpha = render_outputs
+        rasterizer_modified = True
+    else:
+        # Fallback: old rasterizer with 3 outputs
+        im, radius, depth = render_outputs
+        rasterizer_modified = False
+    
     curr_id = curr_data["id"]
-
     im = torch.exp(params["cam_m"][curr_id])[:, None, None] * im + params["cam_c"][curr_id][:, None, None]
     losses["im"] = 0.8 * l1_loss_v1(im, curr_data["im"]) + 0.2 * (1.0 - calc_ssim(im, curr_data["im"]))
 
     state.means2D = rendervar["means2D"]
 
-    # 2) per-Gaussian photometric uncertainty (pixel-sampled)
-    uncertainty, centers2d_px = compute_photometric_uncertainty(params, curr_data, im)
+    # 2) per-Gaussian uncertainty (USplat4D §4.1, Eq. 3, 5)
+    if rasterizer_modified:
+        # Paper-faithful uncertainty using transmittance and gaussian IDs
+        uncertainty = compute_gaussian_uncertainty(
+            gaussians_per_pixel=gaussian_ids,
+            transmittance_alpha=transmittance_alpha,
+            num_gaussians=params['means3D'].shape[0],
+            convergence_threshold=0.1,  # ηc in Eq. 5 (relaxed from 0.05)
+            rendered_image=im.permute(1, 2, 0),  # [H, W, 3]
+            target_image=curr_data["im"].permute(1, 2, 0),  # [H, W, 3]
+            phi_constant=1e7,  # φ for non-converged pixels (much larger than typical σ²)
+        )
+        
+        # Debug: print uncertainty statistics (only first time per timestep)
+        if not is_initial_timestep and len(state.curr_uncertainty) == 0 and t is not None:
+            with torch.no_grad():
+                n_phi = (uncertainty >= 1e7).sum().item()
+                u_converged = uncertainty[uncertainty < 1e7]  # Exclude φ-penalized
+                u_min = u_converged.min().item() if len(u_converged) > 0 else 0.0
+                u_max = u_converged.max().item() if len(u_converged) > 0 else 0.0
+                print(f"[uncertainty] t={t}, "
+                      f"all: [{uncertainty.min().item():.1e}, {uncertainty.max().item():.1e}], "
+                      f"converged ({len(u_converged)}/{len(uncertainty)}): "
+                      f"[{u_min:.1e}, {u_max:.1e}], "
+                      f"non-converged: {n_phi}")
+    else:
+        # Fallback: proxy uncertainty (project to pixel and sample)
+        print("[WARNING] Rasterizer not modified - using proxy uncertainty")
+        pts_world = params["means3D"]
+        N = pts_world.shape[0]
+        ones = torch.ones((N, 1), device=pts_world.device)
+        pts_h = torch.cat([pts_world, ones], dim=1)
+        w2c = curr_data["w2c"]
+        pts_cam = (w2c @ pts_h.T).T
+        K = curr_data["K"]
+        u = (K[0, 0] * (pts_cam[:, 0] / pts_cam[:, 2].clamp(min=1e-6)) + K[0, 2]).clamp(0, curr_data["width"] - 1).long()
+        v = (K[1, 1] * (pts_cam[:, 1] / pts_cam[:, 2].clamp(min=1e-6)) + K[1, 2]).clamp(0, curr_data["height"] - 1).long()
+        pred_rgb = im[:, v, u].permute(1, 0)
+        gt_rgb = curr_data["im"][:, v, u].permute(1, 0)
+        uncertainty = torch.abs(pred_rgb - gt_rgb).mean(dim=1)
+    
     if not is_initial_timestep:
         state.curr_uncertainty.append(uncertainty.detach().cpu())
 
-    # one overlay dump for visual sanity check
-    if not state.saved_uncertainty_debug:
+    # one overlay dump for visual sanity check (first iteration of each timestep, camera 0)
+    if not is_initial_timestep and len(state.curr_uncertainty) == 1 and curr_id == 0 and t is not None:
         with torch.no_grad():
+            centers2d_px = compute_centers2d(params, curr_data)
             rendered_np = im.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
-            overlay_path = f"./output/uncertainty_debug_t{curr_id:02d}.png"
+            overlay_path = f"./output/uncertainty_debug_t{t:02d}_cam{curr_id:02d}.png"
             overlay_uncertainty_on_image_pil(
                 image_np=rendered_np,
                 centers2d=centers2d_px,
@@ -202,12 +231,12 @@ def get_loss(params, curr_data, state: TemporalState, is_initial_timestep):
                 out_path=overlay_path,
             )
             print(f"[USplat4D DEBUG] Saved uncertainty overlay: {overlay_path}")
-            state.saved_uncertainty_debug = True
 
     # 3) segmentation render
     segrendervar = params2rendervar(params)
     segrendervar["colors_precomp"] = params["seg_colors"]
-    seg, _, _, = Renderer(raster_settings=curr_data["cam"])(**segrendervar)
+    seg_outputs = Renderer(raster_settings=curr_data["cam"])(**segrendervar)
+    seg = seg_outputs[0]  # Only need color output
     losses["seg"] = 0.8 * l1_loss_v1(seg, curr_data["seg"]) + 0.2 * (1.0 - calc_ssim(seg, curr_data["seg"]))
 
     # 4) motion regularization, floor, bg, color consistency
@@ -354,7 +383,8 @@ def initialize_post_first_timestep(params, state: TemporalState, optimizer, num_
 
 def report_progress(params, data, i, progress_bar, every_i=100):
     if i % every_i == 0:
-        im, _, _, = Renderer(raster_settings=data['cam'])(**params2rendervar(params))
+        render_out = Renderer(raster_settings=data['cam'])(**params2rendervar(params))
+        im = render_out[0]
         curr_id = data['id']
         im = torch.exp(params['cam_m'][curr_id])[:, None, None] * im + params['cam_c'][curr_id][:, None, None]
         psnr = calc_psnr(im, data['im']).mean()
@@ -410,7 +440,7 @@ def train(seq, exp):
         # ---- Stage 4: per-iteration optimization ----
         for i in range(num_iter_per_timestep):
             curr_data = get_batch(todo_dataset, dataset)
-            loss, state = get_loss(params, curr_data, state, is_initial_timestep)
+            loss, state = get_loss(params, curr_data, state, is_initial_timestep, t=t)
             loss.backward()
             with torch.no_grad():
                 report_progress(params, dataset[0], i, progress_bar)
@@ -469,7 +499,8 @@ def train(seq, exp):
                     
                     # Render current frame for visualization
                     rendervar = params2rendervar(params)
-                    im_vis, radius_vis, _ = Renderer(raster_settings=dataset[0]['cam'])(**rendervar)
+                    vis_outputs = Renderer(raster_settings=dataset[0]['cam'])(**rendervar)
+                    im_vis, radius_vis = vis_outputs[0], vis_outputs[1]
                     curr_id = dataset[0]['id']
                     im_vis = torch.exp(params['cam_m'][curr_id])[:, None, None] * im_vis + params['cam_c'][curr_id][:, None, None]
                     
