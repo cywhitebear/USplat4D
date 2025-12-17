@@ -48,8 +48,9 @@ def build_temporal_graph(
         Appends to state.temporal_graph (list of dicts per timestep):
         - 'key_key_edges': (M_k, k) int tensor of neighbor indices
         - 'key_key_weights': (M_k, k) float tensor of edge weights
-        - 'non_key_assignments': (M_n,) int tensor of assigned key-node indices
-        - 'non_key_weights': (M_n,) float tensor for DQB blending
+        - 'non_key_edges': (M_n, k) int tensor of k-nearest key neighbors for DQB
+        - 'non_key_weights': (M_n, k) float tensor normalized per row for DQB blending
+        - 'non_key_assignments': (M_n,) int tensor of closest key-node (backward compat)
         - 'key_transforms': (M_k, 4, 4) SE(3) transforms (identity at t=0)
     
     Raises:
@@ -104,15 +105,16 @@ def build_temporal_graph(
     )
     
     # ============================================================
-    # 2. Build non-key assignments (Eq. 8)
+    # 2. Build non-key edges (Eq. 8, 10 - k-NN for DQB)
     # ============================================================
     
-    non_key_assignments, non_key_weights = _assign_nonkey_to_key(
+    non_key_edges, non_key_weights, non_key_assignments = _assign_nonkey_to_key(
         means3D=means3D,
         uncertainty_window=state.uncertainty_window,
         non_key_indices=non_key_indices,
         key_indices=key_indices,
         output_params=output_params,
+        num_knn=num_knn,  # Use same k as key-key edges for consistency
     )
     
     # ============================================================
@@ -133,8 +135,9 @@ def build_temporal_graph(
         'non_key_indices': non_key_indices,
         'key_key_edges': key_key_edges,
         'key_key_weights': key_key_weights,
-        'non_key_assignments': non_key_assignments,
-        'non_key_weights': non_key_weights,
+        'non_key_edges': non_key_edges,  # (M_n, k) k-NN edges for DQB
+        'non_key_weights': non_key_weights,  # (M_n, k) normalized weights for DQB
+        'non_key_assignments': non_key_assignments,  # (M_n,) closest key (backward compat)
         'key_transforms': key_transforms,  # Optimizable parameter
     }
     
@@ -143,7 +146,8 @@ def build_temporal_graph(
     print(
         f"[temporal_graph] t={t}, "
         f"key_nodes={M_k}, non_key_nodes={M_n}, "
-        f"key_edges={key_key_edges.shape[0]}×{key_key_edges.shape[1]}"
+        f"key_edges={key_key_edges.shape[0]}×{key_key_edges.shape[1]}, "
+        f"non-key_edges={non_key_edges.shape[0]}×{non_key_edges.shape[1]} (k-NN for DQB)"
     )
 
 
@@ -259,12 +263,13 @@ def _assign_nonkey_to_key(
     non_key_indices: torch.Tensor,
     key_indices: torch.Tensor,
     output_params: list = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    num_knn: int = 5,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Assign each non-key node to its closest key node across entire sequence (Eq. 8).
+    Assign each non-key node to k-nearest key nodes for DQB interpolation (Eq. 8, 10).
     
-    For each non-key node i:
-        j = arg min_{l in Vk} sum_{t=0}^{T-1} ||p_i,t - p_l,t||_{U_weighted}
+    For each non-key node i, find k closest key nodes across entire sequence:
+        Neighbors = kNN_{l in Vk} sum_{t=0}^{T-1} ||p_i,t - p_l,t||_{U_weighted}
     
     Args:
         means3D: (N, 3) Gaussian positions (current frame)
@@ -272,18 +277,25 @@ def _assign_nonkey_to_key(
         non_key_indices: (M_n,) indices of non-key nodes
         key_indices: (M_k,) indices of key nodes
         output_params: list of saved params per timestep (for historical positions)
+        num_knn: Number of nearest key neighbors for DQB blending
     
     Returns:
-        assignments: (M_n,) local index into key_indices of assigned key node
-        weights: (M_n,) normalized weights for DQB blending
+        edges: (M_n, k) local indices into key_indices of k-nearest neighbors
+        weights: (M_n, k) normalized weights for DQB blending (sum to 1 per row)
+        assignments: (M_n,) local index of closest key node (for backward compatibility)
     """
     
     M_n = non_key_indices.shape[0]
     M_k = key_indices.shape[0]
     
     if M_n == 0 or M_k == 0:
-        return torch.zeros((M_n,), dtype=torch.long, device='cuda'), \
-               torch.ones((M_n,), dtype=torch.float32, device='cuda')
+        empty_edges = torch.zeros((M_n, num_knn), dtype=torch.long, device='cuda')
+        empty_weights = torch.zeros((M_n, num_knn), dtype=torch.float32, device='cuda')
+        empty_assignments = torch.zeros((M_n,), dtype=torch.long, device='cuda')
+        return empty_edges, empty_weights, empty_assignments
+    
+    # Clamp k to available key nodes
+    k = min(num_knn, M_k)
     
     # ---- Temporal accumulation of distances (Eq. 8) ----
     # sum_{t=0}^{T-1} ||p_i,t - p_l,t||
@@ -329,16 +341,25 @@ def _assign_nonkey_to_key(
         pts_key = means3D[key_indices]  # (M_k, 3)
         dists = torch.cdist(pts_nonkey, pts_key, p=2)  # (M_n, M_k)
     
-    # Find closest key node per non-key node
-    min_dists, assignments = torch.min(dists, dim=1)  # (M_n,)
+    # Find k-nearest key nodes per non-key node
+    topk_dists, topk_indices = torch.topk(dists, k, dim=1, largest=False, sorted=True)  # (M_n, k)
     
-    # Convert distances to weights (exponential decay)
-    weights = torch.exp(-min_dists.clamp(min=1e-8))
+    # Convert distances to weights (exponential decay, normalized per row)
+    weights = torch.exp(-topk_dists.clamp(min=1e-8))  # (M_n, k)
+    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)  # Normalize to sum=1
     
-    # Normalize (all non-keys have normalized weight = 1.0 to their single assigned key)
-    weights = weights / (weights + 1e-8)
+    # Pad to num_knn if k < num_knn
+    if k < num_knn:
+        pad_size = num_knn - k
+        edges = torch.cat([topk_indices, topk_indices[:, :1].repeat(1, pad_size)], dim=1)
+        weights = torch.cat([weights, torch.zeros(M_n, pad_size, device='cuda')], dim=1)
+    else:
+        edges = topk_indices
     
-    return assignments.long(), weights.float()
+    # Closest key node (for backward compatibility)
+    assignments = topk_indices[:, 0]  # (M_n,) - first neighbor
+    
+    return edges.long(), weights.float(), assignments.long()
 
 
 def get_temporal_graph_at_t(state: TemporalState, t: int) -> Dict:
