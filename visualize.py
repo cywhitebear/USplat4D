@@ -9,7 +9,7 @@ from external import build_rotation
 from colormap import colormap
 from copy import deepcopy
 
-RENDER_MODE = 'color'  # 'color', 'depth' or 'centers'
+RENDER_MODE = 'depth'  # 'color', 'depth' or 'centers'
 # RENDER_MODE = 'depth'  # 'color', 'depth' or 'centers'
 # RENDER_MODE = 'centers'  # 'color', 'depth' or 'centers'
 
@@ -110,7 +110,14 @@ def calculate_rot_vec(scene_data, is_fg):
 def render(w2c, k, timestep_data):
     with torch.no_grad():
         cam = setup_camera(w, h, k, w2c, near, far)
-        im, _, depth, = Renderer(raster_settings=cam)(**timestep_data)
+        render_outputs = Renderer(raster_settings=cam)(**timestep_data)
+        
+        # Handle both modified (5 outputs) and original (3 outputs) rasterizer
+        if len(render_outputs) == 5:
+            im, _, depth, _, _ = render_outputs  # color, radius, depth, gaussian_ids, transmittance_alpha
+        else:
+            im, _, depth = render_outputs  # color, radius, depth
+        
         return im, depth
 
 
@@ -234,6 +241,7 @@ def visualize(seq, exp):
 
 if __name__ == "__main__":
     exp_name = "pretrained"
+    # exp_name = "exp_motion_opt_test"
     # datasets = ["basketball", "boxes", "football", "juggle", "softball", "tennis"]
     datasets = ["basketball"]
     for sequence in datasets:
