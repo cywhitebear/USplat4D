@@ -299,37 +299,66 @@ def _assign_nonkey_to_key(
     
     # ---- Temporal accumulation of distances (Eq. 8) ----
     # sum_{t=0}^{T-1} ||p_i,t - p_l,t||
+    # 
+    # Memory optimization: Only use recent history (window_size timesteps)
+    # to avoid OOM with 64+ timesteps × 370k non-keys × 1.8k keys
+    
+    temporal_window_size = 5  # Use last 5 timesteps (matches T_min for key selection)
     
     if output_params and len(output_params) >= 2:
-        # Full temporal accumulation across all saved timesteps
-        # output_params[0] = t=0, output_params[1:] = t=1+
+        # Use only recent timesteps for temporal accumulation
+        start_idx = max(1, len(output_params) - temporal_window_size)
+        recent_params = output_params[start_idx:]
+        
         total_dists = None
         
-        for idx, p in enumerate(output_params[1:], start=1):  # Skip t=0 (has all params)
-            pos_t = torch.tensor(p['means3D']).cuda()  # (N, 3)
+        for idx, p in enumerate(recent_params, start=start_idx):
+            pos_t = torch.tensor(p['means3D'], device='cuda', dtype=torch.float32)  # (N, 3)
             pts_nonkey_t = pos_t[non_key_indices]  # (M_n, 3)
             pts_key_t = pos_t[key_indices]  # (M_k, 3)
             
-            dists_t = torch.cdist(pts_nonkey_t, pts_key_t, p=2)  # (M_n, M_k)
+            # Compute distances in chunks to reduce memory
+            chunk_size = 50000  # Process 50k non-keys at a time
+            if M_n > chunk_size:
+                dists_t = torch.zeros(M_n, M_k, device='cuda', dtype=torch.float32)
+                for start in range(0, M_n, chunk_size):
+                    end = min(start + chunk_size, M_n)
+                    dists_t[start:end] = torch.cdist(pts_nonkey_t[start:end], pts_key_t, p=2)
+            else:
+                dists_t = torch.cdist(pts_nonkey_t, pts_key_t, p=2)  # (M_n, M_k)
             
             # Uncertainty weighting (if available in window)
-            # Note: uncertainty_window may be shorter than output_params
             window_idx = idx - 1  # Adjust for window indexing
             if window_idx < len(uncertainty_window):
-                unc_t = uncertainty_window[window_idx].cuda()  # (N,)
-                unc_nonkey = unc_t[non_key_indices.cpu()].cuda().unsqueeze(1)  # (M_n, 1)
-                unc_key = unc_t[key_indices.cpu()].cuda().unsqueeze(0)  # (1, M_k)
-                unc_pair = unc_nonkey + unc_key  # (M_n, M_k)
-                dists_t = dists_t * torch.sqrt(1.0 + unc_pair.clamp(min=0))
+                unc_t = uncertainty_window[window_idx]
+                if not isinstance(unc_t, torch.Tensor):
+                    unc_t = torch.tensor(unc_t, device='cuda', dtype=torch.float32)
+                elif unc_t.device.type != 'cuda':
+                    unc_t = unc_t.cuda()
+                
+                # Process uncertainty weighting in chunks too
+                if M_n > chunk_size:
+                    for start in range(0, M_n, chunk_size):
+                        end = min(start + chunk_size, M_n)
+                        nk_indices = non_key_indices[start:end].cpu()
+                        unc_nonkey = unc_t[nk_indices].cuda().unsqueeze(1)  # (chunk, 1)
+                        unc_key = unc_t[key_indices.cpu()].cuda().unsqueeze(0)  # (1, M_k)
+                        unc_pair = unc_nonkey + unc_key  # (chunk, M_k)
+                        dists_t[start:end] = dists_t[start:end] * torch.sqrt(1.0 + unc_pair.clamp(min=0))
+                else:
+                    unc_nonkey = unc_t[non_key_indices.cpu()].cuda().unsqueeze(1)  # (M_n, 1)
+                    unc_key = unc_t[key_indices.cpu()].cuda().unsqueeze(0)  # (1, M_k)
+                    unc_pair = unc_nonkey + unc_key  # (M_n, M_k)
+                    dists_t = dists_t * torch.sqrt(1.0 + unc_pair.clamp(min=0))
             
             if total_dists is None:
                 total_dists = dists_t
             else:
                 total_dists = total_dists + dists_t
         
-        # Average distance across timesteps
+        # Average distance across timesteps used
         if total_dists is not None:
-            dists = total_dists / (len(output_params) - 1)
+            dists = total_dists / len(recent_params)
         else:
             # Fallback if no historical data
             pts_nonkey = means3D[non_key_indices]

@@ -218,11 +218,11 @@ def get_loss(params, curr_data, state: TemporalState, is_initial_timestep, t=Non
         state.curr_uncertainty.append(uncertainty.detach().cpu())
 
     # one overlay dump for visual sanity check (first iteration of each timestep, camera 0)
-    if not is_initial_timestep and len(state.curr_uncertainty) == 1 and curr_id == 0 and t is not None:
+    if not is_initial_timestep and len(state.curr_uncertainty) == 1 and t is not None:
         with torch.no_grad():
             centers2d_px = compute_centers2d(params, curr_data)
             rendered_np = im.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
-            overlay_path = f"./output/uncertainty_debug_t{t:02d}_cam{curr_id:02d}.png"
+            overlay_path = f"./output/uncertainty_debug/uncertainty_debug_t{t:02d}_cam{curr_id:02d}.png"
             overlay_uncertainty_on_image_pil(
                 image_np=rendered_np,
                 centers2d=centers2d_px,
@@ -477,10 +477,14 @@ def train(seq, exp):
             c2w = torch.inverse(w2c)  # [4, 4] camera-to-world
             camera_rotation = c2w[:3, :3]  # [3, 3] rotation only
             
+            # Memory optimization: Pass only recent history to graph construction
+            # (temporal_window_size=5 in _assign_nonkey_to_key)
+            recent_output_params = [output_params[0]] + output_params[-5:] if len(output_params) > 6 else output_params
+            
             build_temporal_graph(
                 params=params,
                 state=state,
-                output_params=output_params,
+                output_params=recent_output_params,  # Use recent history only
                 t=t,
                 num_knn=5,
                 camera_rotation=camera_rotation,
@@ -517,7 +521,7 @@ def train(seq, exp):
                     centers2d = torch.stack([u, v], dim=1)
                     
                     rendered_np = im_vis.detach().clamp(0.0, 1.0).cpu().permute(1, 2, 0).numpy()
-                    graph_vis_path = f"./output/graph_vis_t{t:02d}.png"
+                    graph_vis_path = f"./output/graph_debug/graph_vis_t{t:02d}.png"
                     visualize_graph_on_image(
                         image_np=rendered_np,
                         centers2d=centers2d,
