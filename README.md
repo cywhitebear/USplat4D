@@ -102,11 +102,12 @@ CUDA_VISIBLE_DEVICES=0 CUDA_LAUNCH_BLOCKING=1 python lib_usplat4d_viewer/usplat4
 
 Run MoSca for comparison by:
 ```bash
-cd USplat4d_vMoSca
+cd MoSca_mask
+ini_folder_path=/data/dataset/davis480_mosca_trained_masked
 seq_name=train
 CUDA_VISIBLE_DEVICES=0 CUDA_LAUNCH_BLOCKING=1 python lib_usplat4d_viewer/usplat4d_run_rendering.py \
     --cfg_fn profile/demo/demo_fit.yaml \
-    --work_dir /data/dataset/davis480_mosca_trained_masked/${seq_name}/logs/demo_fit_native_add3
+    --work_dir ${ini_folder_path}/${seq_name}/logs/demo_fit_native_add3
 ```
 
 ## Evaluation
