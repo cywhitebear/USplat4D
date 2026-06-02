@@ -28,6 +28,9 @@ Requires: Linux, conda, NVIDIA driver with CUDA ≥ 12.1, gcc available on PATH.
 git clone --recursive git@github.com:TAMU-Visual-AI/usplat4d.git && cd usplat4d
 bash install_usplat4d_env.sh
 conda activate usplat4d
+cd external/gsplat
+git checkout contribs1.5.3
+pip install -e . --no-build-isolation
 ```
 
 The script handles everything: creates a Python 3.10 env, installs PyTorch 2.1.2 + CUDA 12.1, pins `mkl=2023.1.0` (to avoid the `iJIT_NotifyEvent` ABI bug), installs `xformers` / `pytorch3d` / `fvcore` / PyG wheels, the four local CUDA extensions in `MoSca_mask/lib_render/`, plus optional `jax` (for DyCheck eval) and `nvdiffrast`.
@@ -43,6 +46,7 @@ GPU architecture is auto-detected via `nvidia-smi`. Override defaults as env var
 
 # install conda env
 bash install_usplat4d_env.sh
+conda activate usplat4d
 
 # install gsplat with uncertainty estimation if you have not installed it.
 # USplat4D relies on uncertainty estimation, so make sure you install this gsplat version for uncertainty estimation.
