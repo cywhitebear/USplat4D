@@ -5,7 +5,7 @@
 [![Contact Author](https://img.shields.io/badge/Contact%20Author-Email-green)](mailto:fengzh_g@tamu.edu)
 
 
-Code release of **USplat4D** - **U**ncertainty Matters in Dynamic Gaussian **Splat**ting for Monocular **4D** Reconstruction. We support the initialization from 4DGS including [MoSca](https://www.cis.upenn.edu/~leijh/projects/mosca/).
+Code release of **USplat4D** - **U**ncertainty Matters in Dynamic Gaussian **Splat**ting for Monocular **4D** Reconstruction. We support the initialization from 4DGS including [MoSca](https://jiahuilei.com/projects/mosca/).
 
 ## Updates
 - 06/02/2026 Code Release of USplat4D supporting MoSca's 4DGS output. We also released the unofficial implementation of FG/BG mask support for MoSca.
