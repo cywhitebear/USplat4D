@@ -1,4 +1,4 @@
-# USplat4D: Uncertainty Matters in Dynamic Gaussian Splatting for Monocular 4D Reconstruction
+# USplat4D: Uncertainty Matters in Dynamic Gaussian Splatting for Monocular 4D Reconstruction (Accepted to ICLR2026)
 
 [![Project Page](https://img.shields.io/badge/Project%20Page-Visit-blue)](https://tamu-visual-ai.github.io/usplat4d/)
 [![Paper](https://img.shields.io/badge/Latest%20Paper-Read-orange)](https://arxiv.org/abs/2510.12768)
@@ -56,7 +56,7 @@ See [`info.txt`](./info.txt) for the full reasoning behind each step and known g
 Follow [`./MoSca_mask/readme.md`](./MoSca_mask/readme.md) to download the weights for 2D foundation models.
 
 ## Download Dataset
-Download dycheck dataset (or iphone dataset) [here]() and Davis dataset [here](). And make sure you have this folder structure:
+Download dycheck dataset (or iphone dataset) [here](https://kair-bair.github.io/dycheck/) and Davis dataset [here](https://davischallenge.org/). And make sure you have this folder structure:
 ```bash
 <Dataset_folder>
 ├── <instance_1_folder>
