@@ -1,0 +1,155 @@
+# =============================================================================
+# usplat4d install (verified on H100, CUDA 12.1, Ubuntu/conda env)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1) Create env + activate
+# ---------------------------------------------------------------------------
+conda create -n usplat4d python=3.10.16 -y
+conda activate usplat4d
+
+# ---------------------------------------------------------------------------
+# 2) Install torch with CUDA 12.1
+# ---------------------------------------------------------------------------
+conda install pytorch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 \
+              pytorch-cuda=12.1 -c pytorch -c nvidia -y
+
+# ---------------------------------------------------------------------------
+# 3) Fix mkl ABI bug (torch <=2.2 vs mkl>=2024.1: undefined symbol iJIT_NotifyEvent)
+# ---------------------------------------------------------------------------
+conda install mkl=2023.1.0 -y
+
+# ---------------------------------------------------------------------------
+# 4) Other conda packages
+#    NOTE: pytorch3d's conda channel only ships cu118 builds for 0.7.8.
+#          On cu121 we install fvcore/iopath via conda but pytorch3d from source.
+# ---------------------------------------------------------------------------
+conda install -c xformers   xformers=0.0.23.post1 -y
+conda install -c conda-forge fvcore iopath -y
+
+# pytorch3d from source (cu121 + torch 2.1.2). Needs nvcc 12.1 + gcc<=12; we
+# install those in step 6 below, then run this command. If you have system
+# CUDA 12.1 already on PATH and gcc<=12, you can do it here instead.
+# NOTE: pytorch3d tags 0.7.8 as V0.7.8 (uppercase V); every other 0.7.x uses lowercase v.
+# pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@V0.7.8"
+
+# ---------------------------------------------------------------------------
+# 5) Pip packages
+# ---------------------------------------------------------------------------
+pip install -r requirements.txt
+pip install numpy==1.26.4
+
+# PyG wheels (need their custom index for the +pt21cu121 build tag)
+pip install \
+    pyg-lib==0.4.0 \
+    torch-scatter==2.1.2 \
+    torch-sparse==0.6.18 \
+    torch-cluster==1.6.3 \
+    torch-spline-conv==1.2.2 \
+    -f https://data.pyg.org/whl/torch-2.1.2+cu121.html
+pip install torch-geometric==2.6.1
+pip install pytorch-lightning==2.1.4   # 2.0.2 also works; 2.1.4 is the safer LTS
+
+# ---------------------------------------------------------------------------
+# 6) Build toolchain for compiling local CUDA extensions in lib_render/
+#    - nvcc + cuda dev libs PINNED to 12.1 via the versioned label channel.
+#      DO NOT use `-c nvidia` (unlabeled), it pulls cuda-nvcc 13.x.
+#    - gcc 11 is needed because CUDA 12.1's nvcc rejects gcc>=13.
+# ---------------------------------------------------------------------------
+conda install -c nvidia/label/cuda-12.1.0 \
+    cuda-nvcc cuda-cudart-dev cuda-nvrtc-dev cuda-libraries-dev -y
+conda install -c conda-forge \
+    gcc_linux-64=11 gxx_linux-64=11 sysroot_linux-64=2.17 -y
+pip install ninja
+
+# ---------------------------------------------------------------------------
+# 6b) Repair dangling cuda .so symlinks
+#     Switching between cuda-cudart-dev=12.1.55 (default `nvidia` channel) and
+#     =12.1.105 (`nvidia/label/cuda-12.1.0`) leaves the unversioned `libX.so`
+#     symlinks pointing at non-existent files. Linker then fails with
+#     `cannot find -lcudart` even though libcudart.so.12.1.105 exists.
+# ---------------------------------------------------------------------------
+cd $CONDA_PREFIX/lib && for f in libcudart libcurand libnvrtc libnvJitLink \
+                                  libnvjpeg libcufile libcufile_rdma; do
+  if [ -L "${f}.so" ] && [ ! -e "${f}.so" ]; then
+    target=$(ls ${f}.so.[0-9]* 2>/dev/null \
+             | grep -E "^${f}\.so\.[0-9]+$" | head -n1)
+    [ -n "$target" ] && ln -sf "$target" "${f}.so" && echo "fixed ${f}.so -> $target"
+  fi
+done
+# libnvrtc-builtins has a .so.12.1 (not .so.12) major symlink, fix separately:
+ln -sf libnvrtc-builtins.so.12.1 $CONDA_PREFIX/lib/libnvrtc-builtins.so
+cd -
+
+# Verify no dangling symlinks before building extensions:
+# for f in $CONDA_PREFIX/lib/lib*.so; do
+#   [ -L "$f" ] && [ ! -e "$f" ] && echo "BROKEN: $f -> $(readlink "$f")"
+# done
+
+# ---------------------------------------------------------------------------
+# 7) Build the local CUDA extensions
+#    --no-build-isolation: setup.py imports torch at top level, so it needs
+#                          the active env (PEP 517 sandbox doesn't have torch).
+#    TORCH_CUDA_ARCH_LIST: set to your GPU. Examples:
+#      V100=7.0  T4=7.5  A100=8.0  RTX30xx=8.6  RTX40xx=8.9  H100=9.0
+#    Auto-detect:  nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1
+# ---------------------------------------------------------------------------
+export CUDA_HOME=$CONDA_PREFIX
+export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-cc
+export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++
+export FORCE_CUDA=1
+export TORCH_CUDA_ARCH_LIST="9.0"   # H100; change for your GPU
+export MAX_JOBS=8
+
+pip install --no-build-isolation --no-cache-dir MoSca_mask/lib_render/simple-knn
+pip install --no-build-isolation --no-cache-dir MoSca_mask/lib_render/diff-gaussian-rasterization-alphadep-add3
+pip install --no-build-isolation --no-cache-dir MoSca_mask/lib_render/diff-gaussian-rasterization-alphadep
+pip install --no-build-isolation --no-cache-dir MoSca_mask/lib_render/gof-diff-gaussian-rasterization
+
+# ---------------------------------------------------------------------------
+# 8) Sanity check (must `import torch` FIRST so it injects torch/lib/ into
+#    the loader's search path; otherwise libc10.so won't be found).
+# ---------------------------------------------------------------------------
+python -c "
+import torch
+print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())
+import simple_knn._C, diff_gaussian_rasterization, diff_gaussian_rasterization_add3, gof_diff_gaussian_rasterization
+print('all four GS extensions import ok')
+x = torch.rand(1000, 3, device='cuda')
+from simple_knn._C import distCUDA2
+print('distCUDA2 H100 test:', distCUDA2(x).shape)
+"
+
+# ---------------------------------------------------------------------------
+# 9) (Optional) JAX for DyCheck evaluation
+# ---------------------------------------------------------------------------
+# Three gotchas, all addressed by the pins below:
+#   (a) jax 0.4.14 still uses scipy.linalg.tril at import; scipy>=1.13 removed it.
+#       Pin scipy<1.13 first so pip downgrades the env's scipy==1.15.2.
+#   (b) optax 0.1.4 imports jnp.DeviceArray (removed in jax 0.4.x). Use 0.1.7.
+#   (c) The plain jaxlib 0.4.14+cuda12.cudnn89 wheel does NOT bundle cuDNN/cuSPARSE.
+#       Conda's CUDA 12.1 ships cuSPARSE 12.0.2 which is too old for jax on H100,
+#       so jax silently falls back to CPU. The jax[cuda12_pip] extra installs the
+#       nvidia-cudnn-cu12 / nvidia-cusparse-cu12 / etc. wheels alongside, which
+#       jax loads in preference. Verified GPU backend on H100 (sm_90).
+pip install "scipy<1.13"
+pip install "jax[cuda12_pip]==0.4.14" jaxlib==0.4.14+cuda12.cudnn89 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+pip install chex==0.1.82 dm-haiku==0.0.10 dm-tree==0.1.8 flax==0.7.1 \
+            jaxline==0.0.5 jaxtyping==0.3.2 jmp==0.0.4 \
+            ml-collections==1.1.0 optax==0.1.7 orbax-checkpoint==0.4.4 \
+            tensorstore==0.1.74
+
+# ---------------------------------------------------------------------------
+# 10) (Optional) mmcv-full and nvdiffrast — only if your pipeline uses them
+# ---------------------------------------------------------------------------
+# pip install mmcv-full==1.7.2 \
+#     -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.2/index.html
+pip install --no-build-isolation \
+    "git+https://github.com/NVlabs/nvdiffrast.git@v0.3.3"
+
+# ---------------------------------------------------------------------------
+# 11) (Optional) gsplat with uncertainty estimation functionality
+# ---------------------------------------------------------------------------
+cd <gsplat with uncertainty estimation folder path>
+pip install -e . --no-build-isolation

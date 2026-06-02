@@ -1,0 +1,15 @@
+{
+    "exclude": [
+        "logs",
+        "data",
+        "build",
+        "**/__pycache__",
+        "build",
+        "debug",
+        "viz",
+        "demo",
+        "demo2",
+        "demo_old",
+        "lib_from_som",
+    ]
+}

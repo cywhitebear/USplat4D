@@ -1,0 +1,2 @@
+# USplat4D (initialized by MoSca)
+We support USplat4D on the MoSca output. After initializing from MoSca, run USplat4D preprecessing and reconstruction to get the optimized results. The Official Implementation of `MoSca: A Modern 4D Reconstruction System for Monocular Videos` can be found [here](https://www.cis.upenn.edu/~leijh/projects/mosca/).
