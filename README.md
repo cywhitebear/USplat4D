@@ -25,7 +25,7 @@ Code release of **USplat4D** - **U**ncertainty Matters in Dynamic Gaussian **Spl
 Requires: Linux, conda, NVIDIA driver with CUDA ≥ 12.1, gcc available on PATH. Verified on H100 (sm_90).
 
 ```bash
-git clone <this-repo> usplat4d_release && cd usplat4d_release
+git clone --recursive git@github.com:TAMU-Visual-AI/usplat4d.git && cd usplat4d
 bash install_usplat4d_env.sh
 conda activate usplat4d
 ```
