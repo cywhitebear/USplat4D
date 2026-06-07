@@ -11,7 +11,7 @@
 # Environment overrides (set before invoking):
 #   ENV_NAME            conda env name                       (default: usplat4d)
 #   PY_VERSION          Python version                       (default: 3.10.16)
-#   TORCH_CUDA_ARCH_LIST   e.g. "9.0" for H100, "8.6" for 3090, "8.9" for 4090
+#   TORCH_CUDA_ARCH_LIST   e.g. "9.0" for H100, "8.6" for 3090, "8.9" for 4090, "12.0" for 5090
 #                          (default: auto-detected via nvidia-smi)
 #   MAX_JOBS            parallel compile jobs                (default: 8)
 #   REPO_ROOT           usplat4d_release directory  (default: dir of this script)
@@ -38,7 +38,7 @@ REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
 GSPLAT_DIR="${GSPLAT_DIR:-}"
 
 INSTALL_PYTORCH3D="${INSTALL_PYTORCH3D:-1}"
-INSTALL_JAX="${INSTALL_JAX:-1}"
+INSTALL_JAX="${INSTALL_JAX:-0}"   # jax 0.4.14 untested on Blackwell (sm_120); enable manually if needed
 # INSTALL_MMCV="${INSTALL_MMCV:-0}"
 INSTALL_NVDIFFRAST="${INSTALL_NVDIFFRAST:-1}"
 INSTALL_GSPLAT="${INSTALL_GSPLAT:-0}"
@@ -84,11 +84,11 @@ conda activate "$ENV_NAME"
 echo "Active python: $(which python)"
 echo "Active pip:    $(which pip)"
 
-# ----------------------- 2) Torch + CUDA 12.1 --------------------------------
-log "[2/11] Install PyTorch 2.1.2 + CUDA 12.1"
-conda install -y \
-    pytorch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 pytorch-cuda=12.1 \
-    -c pytorch -c nvidia
+# ----------------------- 2) Torch + CUDA 12.8 --------------------------------
+# pytorch-cuda=12.8 does not exist on the pytorch conda channel; use pip whl index instead.
+log "[2/11] Install PyTorch 2.7.0 + CUDA 12.8 (via pip whl index)"
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # ----------------------- 3) mkl ABI fix --------------------------------------
 log "[3/11] Pin mkl=2023.1.0 to avoid the iJIT_NotifyEvent ABI break"
@@ -96,7 +96,7 @@ conda install -y mkl=2023.1.0
 
 # ----------------------- 4) Other conda deps ---------------------------------
 log "[4/11] xformers / fvcore / iopath"
-conda install -y -c xformers   xformers=0.0.23.post1
+pip install "xformers==0.0.30" --index-url https://download.pytorch.org/whl/cu128
 conda install -y -c conda-forge fvcore iopath
 
 # ----------------------- 5) Pip packages -------------------------------------
@@ -106,21 +106,22 @@ pip install numpy==1.26.4   # re-pin in case a transitive dep bumped it
 
 log "[5/11] PyG wheels (custom index)"
 pip install \
-    pyg-lib==0.4.0 \
-    torch-scatter==2.1.2 \
-    torch-sparse==0.6.18 \
-    torch-cluster==1.6.3 \
-    torch-spline-conv==1.2.2 \
-    -f https://data.pyg.org/whl/torch-2.1.2+cu121.html
+    pyg-lib \
+    torch-scatter \
+    torch-sparse \
+    torch-cluster \
+    torch-spline-conv \
+    -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 pip install torch-geometric==2.6.1
 pip install pytorch-lightning==2.1.4
 
 # ----------------------- 6) Build toolchain ----------------------------------
-log "[6/11] Pin cuda-nvcc 12.1 via the versioned label channel"
-conda install -y -c nvidia/label/cuda-12.1.0 \
-    cuda-nvcc cuda-cudart-dev cuda-nvrtc-dev cuda-libraries-dev
+log "[6/11] Pin cuda-nvcc 12.8 via the versioned label channel"
+# Pin to =12.8 to prevent conda from picking 13.x from pkgs/main (which has higher priority).
+conda install -y -c nvidia/label/cuda-12.8.0 \
+    "cuda-nvcc=12.8" "cuda-cudart-dev=12.8" "cuda-nvrtc-dev=12.8" "cuda-libraries-dev=12.8"
 
-log "[6/11] gcc 11 (CUDA 12.1 nvcc rejects gcc>=13)"
+log "[6/11] gcc 11 (safe for CUDA 12.8; 12.8 supports up to gcc 13 but 11 avoids any edge cases)"
 conda install -y -c conda-forge gcc_linux-64=11 gxx_linux-64=11 sysroot_linux-64=2.17
 
 pip install ninja
@@ -168,7 +169,7 @@ export MAX_JOBS
 
 # pytorch3d from source (needs the build toolchain set up above).
 if [ "$INSTALL_PYTORCH3D" = "1" ]; then
-    log "[7/11] pytorch3d 0.7.8 from source (no cu121 conda build exists)"
+    log "[7/11] pytorch3d 0.7.8 from source (no cu128 conda build exists)"
     # Clone full repo (NOT --depth=1 / --filter=blob:none) into a stable path
     # so the install is robust to transient network blips. pip's default
     # `git+...@<tag>` does a partial clone + lazy blob fetch, which can time
@@ -185,7 +186,9 @@ if [ "$INSTALL_PYTORCH3D" = "1" ]; then
     #     ( cd "$PT3D_SRC" && git fetch --depth 1 origin tag V0.7.8 && git checkout V0.7.8 )
     # fi
     # pip install --no-build-isolation --no-cache-dir "$PT3D_SRC"
-    pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@V0.7.8"
+    # V0.7.8 targeted PyTorch 2.1.x; use main until a tag tested on PyTorch 2.7 is released.
+    # Check https://github.com/facebookresearch/pytorch3d/releases and pin a tag when available.
+    pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@main"
 else
     warn "Skipping pytorch3d (INSTALL_PYTORCH3D=0)"
 fi

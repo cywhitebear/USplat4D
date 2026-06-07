@@ -1,3 +1,8 @@
+# NOTE: This file is a frozen snapshot from an H100 / CUDA 12.1 environment.
+# For RTX 5090 (sm_120) + CUDA 12.8, use install_usplat4d_env.sh instead:
+#   bash install_usplat4d_env.sh
+# The key package changes vs this snapshot: PyTorch 2.1.2→2.7.0, CUDA 12.1→12.8,
+# xformers 0.0.23.post1→0.0.30, PyG wheels pt21cu121→pt27cu128.
 name: usplat4d
 channels:
   - xformers
@@ -5,7 +10,7 @@ channels:
   - bottler
   - pytorch
   - nvidia
-  - nvidia/label/cuda-12.1.0
+  - nvidia/label/cuda-12.8.0
   - conda-forge
   - defaults
   - https://repo.anaconda.com/pkgs/main
@@ -176,8 +181,8 @@ dependencies:
   - pysocks=1.7.1
   - python=3.10.16
   - python_abi=3.10
-  - pytorch=2.1.2
-  - pytorch-cuda=12.1
+  - pytorch=2.7.0
+  - pytorch-cuda=12.8
   - pytorch-mutex=1.0
   - pytorch3d=0.7.8
   - pyyaml=6.0.2
@@ -191,9 +196,9 @@ dependencies:
   - tbb=2021.8.0
   - termcolor=3.0.1
   - tk=8.6.14
-  - torchaudio=2.1.2
-  - torchtriton=2.1.0
-  - torchvision=0.16.2
+  - torchaudio=2.7.0
+  - torchtriton=3.0.0
+  - torchvision=0.22.0
   - tqdm=4.67.1
   - urllib3=2.3.0
   - wayland=1.24.0
@@ -204,7 +209,7 @@ dependencies:
   - xcb-util-keysyms=0.4.1
   - xcb-util-renderutil=0.3.10
   - xcb-util-wm=0.4.2
-  - xformers=0.0.23.post1
+  - xformers=0.0.30
   - xkeyboard-config=2.44
   - xorg-libice=1.1.2
   - xorg-libsm=1.2.6
@@ -425,7 +430,7 @@ dependencies:
       - pydantic==2.11.3
       - pydantic-core==2.33.1
       - pydot==3.0.4
-      - pyg-lib==0.4.0+pt21cu121
+      - pyg-lib==0.4.0+pt27cu128
       - pyglet==2.1.6
       - pygments==2.19.1
       - pyopengl==3.1.0
@@ -486,11 +491,11 @@ dependencies:
       - tokenizers==0.21.1
       - tomli==2.2.1
       - toolz==1.0.0
-      - torch-cluster==1.6.3+pt21cu121
+      - torch-cluster==1.6.3+pt27cu128
       - torch-geometric==2.6.1
-      - torch-scatter==2.1.2+pt21cu121
-      - torch-sparse==0.6.18+pt21cu121
-      - torch-spline-conv==1.2.2+pt21cu121
+      - torch-scatter==2.1.2+pt27cu128
+      - torch-sparse==0.6.18+pt27cu128
+      - torch-spline-conv==1.2.2+pt27cu128
       - torchmetrics==1.7.1
       - tornado==6.4.2
       - traitlets==5.14.3

@@ -322,14 +322,13 @@ yapf==0.43.0
 # =============================================================================
 #
 # --- PyG wheels (require their custom index) ---
-# pip install pyg-lib==0.4.0 torch-scatter==2.1.2 torch-sparse==0.6.18 \
-#             torch-cluster==1.6.3 torch-spline-conv==1.2.2 \
-#             -f https://data.pyg.org/whl/torch-2.1.2+cu121.html
+# pip install pyg-lib torch-scatter torch-sparse torch-cluster torch-spline-conv \
+#             -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 # pip install torch-geometric==2.6.1
 #
 # --- mmcv-full (needs openmmlab index) ---
 # pip install mmcv-full==1.7.2 \
-#             -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.2/index.html
+#             -f https://download.openmmlab.com/mmcv/dist/cu128/torch2.7.0/index.html
 #
 # --- jax + jaxlib with CUDA12 (needs the jax storage index) ---
 # pip install jax==0.4.14 jaxlib==0.4.14+cuda12.cudnn89 \
