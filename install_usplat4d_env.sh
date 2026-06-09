@@ -117,12 +117,26 @@ pip install pytorch-lightning==2.1.4
 
 # ----------------------- 6) Build toolchain ----------------------------------
 log "[6/11] Pin cuda-nvcc 12.8 via the versioned label channel"
-# Pin to =12.8 to prevent conda from picking 13.x from pkgs/main (which has higher priority).
+# Write conda pin file FIRST so any subsequent conda install cannot upgrade cuda-nvcc to 13.x.
+mkdir -p "$CONDA_PREFIX/conda-meta"
+cat >> "$CONDA_PREFIX/conda-meta/pinned" <<'PIN'
+cuda-nvcc=12.8.*
+cuda-cudart-dev=12.8.*
+cuda-nvrtc-dev=12.8.*
+cuda-libraries-dev=12.8.*
+PIN
 conda install -y -c nvidia/label/cuda-12.8.0 \
     "cuda-nvcc=12.8" "cuda-cudart-dev=12.8" "cuda-nvrtc-dev=12.8" "cuda-libraries-dev=12.8"
 
 log "[6/11] gcc 11 (safe for CUDA 12.8; 12.8 supports up to gcc 13 but 11 avoids any edge cases)"
 conda install -y -c conda-forge gcc_linux-64=11 gxx_linux-64=11 sysroot_linux-64=2.17
+
+# Verify pin held — abort early if conda upgraded nvcc past 12.8.
+nvcc_ver="$("$CONDA_PREFIX/bin/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')"
+if [[ "$nvcc_ver" != 12.8* ]]; then
+    die "nvcc is $nvcc_ver after gcc install — conda upgraded it past 12.8. Check channel priorities."
+fi
+log "nvcc version confirmed: $nvcc_ver"
 
 pip install ninja
 

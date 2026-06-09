@@ -21,8 +21,8 @@ version_key_edges=minmax_distance_contrib # choices: max_contrib minmax_distance
 # extra_save_str=test
 log_subfolder=iphone_fit_native_add3
 
-ini_folder_path=/data/dataset/iphone_mosca_trained
-usplat4d_folder_path=/data/dataset/iphone_mosca_graph_model
+ini_folder_path=/media/ee904/DATA1/Yun/Datasets/MoSca/iphone
+usplat4d_folder_path=/media/ee904/DATA1/Yun/Datasets/usplat4d_iphone_graph
 
 cd lib_usplat4d_prep
 
@@ -84,10 +84,10 @@ do
 
     CUDA_VISIBLE_DEVICES=$gpu_id python mosca_reconstruct.py \
         --cfg ./profile/iphone/iphone_fit.yaml \
-        --ws /data/dataset/iphone_mosca_trained/${seq_name} \
+        --ws /media/ee904/DATA1/Yun/Datasets/MoSca/iphone/${seq_name} \
         --run_ugraph \
-        --graph_dir /data/dataset/iphone_mosca_graph_model/${seq_name}/${dir_name_saved_propressinging_model}/ \
-        --log_dir /data/dataset/iphone_mosca_trained/${seq_name}/logs/${log_subfolder} \
+        --graph_dir /media/ee904/DATA1/Yun/Datasets/usplat4d_iphone_graph/${seq_name}/${dir_name_saved_propressinging_model}/ \
+        --log_dir /media/ee904/DATA1/Yun/Datasets/MoSca/iphone/${seq_name}/logs/${log_subfolder} \
         --dir_name_saving_this_run_model $dir_name_saving_this_run_model \
         --disable_cam_pose_training
 
