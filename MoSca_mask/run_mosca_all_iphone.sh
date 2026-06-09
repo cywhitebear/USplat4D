@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 gpu_id=0
 set -euo pipefail
+export MPLBACKEND=Agg
 
-root_dir=/data/dataset/iphone_mosca_trained
+root_dir=/media/ee904/DATA1/Yun/Datasets/MoSca/iphone
 
 log_pre="${root_dir}/.log_pre"
 log_recon="${root_dir}/.log_recon"
