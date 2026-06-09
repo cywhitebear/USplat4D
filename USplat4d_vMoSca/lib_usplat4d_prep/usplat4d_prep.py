@@ -780,39 +780,44 @@ def get_knn_edges_key(Transls,Mask,k):
     return edges, mean_dist_masked
 
 def get_knn_edges_others(Transls,Mask,Transls2,Mask2,k):
-    # group by variance of relative motion 
+    # group by variance of relative motion
     # Transls [nt,nk,3]
-    
-    def nanstd(o, dim, keepdim=False):
-        result = torch.sqrt(
-                    torch.nanmean(
-                        torch.pow( torch.abs(o-torch.nanmean(o,dim=dim).unsqueeze(dim)),2),
-                        dim=dim
-                    )
-                )  
-        if keepdim:
-            result = result.unsqueeze(dim)
-        return result
+    # Chunked over nu to avoid OOM from (nt,nu,nk,3) broadcast (e.g. 49 GB for nu=14740,nk=1012,nt=277)
 
     nu=Transls2.shape[1]
-    
-    Dist = torch.norm(Transls2[:, :, None, :] - Transls[:, None, :, :], dim=-1) # [nt, nu, nk]
+    nk=Transls.shape[1]
 
-    # mean_dist=Dist.mean(dim=0) # [nu,nk]
-    Mask_expand=Mask.unsqueeze(1).expand(-1, nu, -1) # [nt,nu,nk]
-    Dist_masked_key = torch.where(Mask_expand, Dist, torch.tensor(float('nan'), device=Dist.device))
-    mean_dist_masked_key=Dist_masked_key.nanmean(dim=0) # [nu,nk] # should not include nan, if we pick correct large contrib key points
-    Dist_masked_key2 = torch.where(Mask_expand, Dist_masked_key, torch.tensor(float('-inf'), device=Dist.device))
-    
-    mean_dist_masked = mean_dist_masked_key
+    chunk_size = 200  # (nt, chunk, nk, 3) intermediate ~675 MB per chunk
 
-    max_dist = torch.max(Dist_masked_key2, dim=0).values # has -inf 
-    max_dist2 = torch.where(~torch.isinf(max_dist), max_dist, torch.tensor(float('inf'), device=max_dist.device))
+    mean_dist_masked_key = torch.zeros(nu, nk)
+    max_dist = torch.full((nu, nk), float('-inf'))
+
+    nan_val = torch.tensor(float('nan'))
+    ninf_val = torch.tensor(float('-inf'))
+
+    for start in range(0, nu, chunk_size):
+        end = min(start + chunk_size, nu)
+        c = end - start
+
+        Dist_chunk = torch.norm(
+            Transls2[:, start:end, None, :] - Transls[:, None, :, :],
+            dim=-1
+        )  # (nt, c, nk)
+
+        Mask_expand_chunk = Mask.unsqueeze(1).expand(-1, c, -1)  # (nt, c, nk)
+
+        Dist_masked_nan = torch.where(Mask_expand_chunk, Dist_chunk, nan_val)
+        mean_dist_masked_key[start:end] = Dist_masked_nan.nanmean(dim=0)  # (c, nk)
+
+        Dist_masked_ninf = torch.where(Mask_expand_chunk, Dist_chunk, ninf_val)
+        max_dist[start:end] = torch.max(Dist_masked_ninf, dim=0).values  # (c, nk)
+
+    max_dist2 = torch.where(~torch.isinf(max_dist), max_dist, torch.tensor(float('inf')))
 
     values, indices = torch.topk(max_dist2, k=k, dim=1, largest=False)  # smallest k distances
-    nu_indices = torch.arange(max_dist2.shape[0]).unsqueeze(1).repeat(1, k)  # shape [nu, k]
+    nu_indices = torch.arange(nu).unsqueeze(1).repeat(1, k)  # shape [nu, k]
     edges = torch.stack([nu_indices, indices], dim=2).reshape(-1, 2)  # shape [nu * k, 2]
-    return edges, mean_dist_masked
+    return edges, mean_dist_masked_key
 
 def run_batch(Transls2,Oris_xyzw2,Contribs2,
               Transls,Oris_xyzw,Transls_optimized,Oris_xyzw_optimized,
@@ -1494,7 +1499,6 @@ def main2(save_dir,voxel_size=0.4,n_min_effective_frames=5,ratio_key=-1):
     
     # Safety check for empty Contribs
     if Contribs.size == 0:
-        breakpoint()
         print("Warning: Contribs array is empty, using contribs_in_mask as fallback")
 
     if ratio_key>0:
@@ -1811,21 +1815,22 @@ def main1(dataset_name,work_dir,save_dir,ws,relative_dir_saved_mosca_model=None,
 
     
 
+    MOSCA_ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))  # USplat4d_vMoSca/
+    MOSCA_PROFILE = osp.join(osp.dirname(MOSCA_ROOT), 'MoSca_mask', 'profile')
     if dataset_name=='iphone':
-        cfg_fn='/data/repo/MoSca/profile/iphone/iphone_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'iphone/iphone_fit.yaml')
     elif dataset_name=='davis' or dataset_name=='davis_mask':
-        cfg_fn='/data/repo/MoSca/profile/demo/demo_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'demo/demo_fit.yaml')
     elif dataset_name=='nvidia':
-        cfg_fn='/data/repo/MoSca/profile/nvidia/nvidia_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'nvidia/nvidia_fit.yaml')
     elif dataset_name=='diffusion4d':
-        cfg_fn='/data/repo/MoSca/profile/demo/demo_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'demo/demo_fit.yaml')
     elif dataset_name=='objaverse':
-        cfg_fn='/data/repo/MoSca/profile/objaverse/objaverse_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'objaverse/objaverse_fit.yaml')
     elif dataset_name=='hypernerfVrig':
-        cfg_fn='/data/repo/MoSca/profile/hypernerfVrig/hypernerfVrig_fit.yaml'
+        cfg_fn=osp.join(MOSCA_PROFILE, 'hypernerfVrig/hypernerfVrig_fit.yaml')
     else:
         cfg_fn=''
-        breakpoint()
     port=9000
 
     device = torch.device("cuda") # if torch.cuda.is_available() else "cpu")
