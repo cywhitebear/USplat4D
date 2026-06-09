@@ -36,7 +36,7 @@ def get_bootstapir_model(
     device=torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"),
 ):
     model = tapir_model.TAPIR(pyramid_level=1)
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, weights_only=False))
     model = model.to(device)
     # model.eval() # ! debug
     return model

@@ -599,7 +599,7 @@ class Precompute_helper(nn.Module):
 
     def read_precomputed_pose_graph(self): 
         file_path_parameters=self.work_dir+'/graph_model/v12_parameters9mee.pth'
-        parameters=torch.load(file_path_parameters)
+        parameters=torch.load(file_path_parameters, weights_only=False)
         return parameters
     
     def get_means_quats_by_ts(self,ts):

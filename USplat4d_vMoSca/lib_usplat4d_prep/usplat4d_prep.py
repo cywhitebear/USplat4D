@@ -1229,7 +1229,7 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
     flag_read=False
     if flag_read:
         # Read variables from the file
-        checkpoint = torch.load('variables_8.pth')
+        checkpoint = torch.load('variables_8.pth', weights_only=False)
         dicts = checkpoint['dicts']
         ids = checkpoint['ids']
         Contribs = checkpoint['Contribs']

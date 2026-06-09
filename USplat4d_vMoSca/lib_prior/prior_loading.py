@@ -488,7 +488,7 @@ class Saved2D(nn.Module):
     def rescale_perframe_depth_from_bundle(self, bundle_pth_fn=None):
         if bundle_pth_fn is None:
             bundle_pth_fn = osp.join(self.ws, "bundle", "bundle.pth")
-        bundle_data = torch.load(bundle_pth_fn)
+        bundle_data = torch.load(bundle_pth_fn, weights_only=False)
         dep_scale = bundle_data["dep_scale"]
         logging.info(f"Rescale depth with {bundle_pth_fn} and scale={dep_scale}")
         self.rescale_depth(dep_scale)

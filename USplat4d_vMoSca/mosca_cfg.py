@@ -28,7 +28,7 @@ def load_model_cfg(cfg, saved_dir, device="cuda", is_eval=True, use_ugraph=True)
     ######################################################################
 
     cams = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(saved_dir, "photometric_cam.pth"))
+        torch.load(osp.join(saved_dir, "photometric_cam.pth"), weights_only=False)
     ).to(device)
     try:
         s_model = StaticGaussian.load_from_ckpt(
@@ -56,7 +56,7 @@ def load_model_cfg(cfg, saved_dir, device="cuda", is_eval=True, use_ugraph=True)
 
     if use_ugraph:
         print("Start loading ugraph model...")
-        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"))
+        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"), weights_only=False)
         ugraph_model: UGraphGaussian = UGraphGaussian.init_from_state_dict(state_dict, None, device)
         ugraph_model.to(device)
         d_model.set_ugraph(ugraph_model)

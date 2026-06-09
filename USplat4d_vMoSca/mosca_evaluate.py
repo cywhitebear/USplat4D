@@ -382,7 +382,7 @@ def test_main(
     ######################################################################
 
     cams = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(saved_dir, "photometric_cam.pth"))
+        torch.load(osp.join(saved_dir, "photometric_cam.pth"), weights_only=False)
     ).to(device)
     s_model = StaticGaussian.load_from_ckpt(
         torch.load(
@@ -405,7 +405,7 @@ def test_main(
     s_model.eval()
 
     try:
-        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"))
+        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"), weights_only=False)
         ugraph_model: UGraphGaussian = UGraphGaussian.init_from_state_dict(state_dict, None, device)
         ugraph_model.to(device)
         ugraph_model.eval()
@@ -574,7 +574,7 @@ def test_pck(saved_dir, gt_npz_fn, device, save_fn=None):
     )
 
     cams = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(saved_dir, "photometric_cam.pth"))
+        torch.load(osp.join(saved_dir, "photometric_cam.pth"), weights_only=False)
     ).to(device)
     s_model = StaticGaussian.load_from_ckpt(
         torch.load(
@@ -597,7 +597,7 @@ def test_pck(saved_dir, gt_npz_fn, device, save_fn=None):
     s_model.to(device)
     s_model.eval()
     try:
-        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"))
+        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"), weights_only=False)
         ugraph_model: UGraphGaussian = UGraphGaussian.init_from_state_dict(state_dict, None, device)
         ugraph_model.to(device)
         ugraph_model.eval()
@@ -670,7 +670,7 @@ def test_pck(saved_dir, gt_npz_fn, device, save_fn=None):
 
 
 def test_sintel_cam(cam_pth_fn, ws, save_path="sintel_pose_metrics.txt"):
-    cams = MonocularCameras.load_from_ckpt(torch.load(cam_pth_fn))
+    cams = MonocularCameras.load_from_ckpt(torch.load(cam_pth_fn), weights_only=False)
     pose_est = cams.T_wc_list().detach().cpu().numpy()
     # gt_dir = osp.join("./data/robust_dynrf/results/Sintel", sq)
     gt_dir = osp.join(ws, "gt_cameras")
@@ -688,7 +688,7 @@ def test_sintel_cam(cam_pth_fn, ws, save_path="sintel_pose_metrics.txt"):
 
 def test_tum_cam(cam_pth_fn, ws, save_path="tum_pose_metrics.txt"):
 
-    cams = MonocularCameras.load_from_ckpt(torch.load(cam_pth_fn))
+    cams = MonocularCameras.load_from_ckpt(torch.load(cam_pth_fn), weights_only=False)
     pose_est = cams.T_wc_list().detach().cpu().numpy()
     tt = np.arange(len(pose_est)).astype(float)
     tum_poses = [c2w_to_tumpose(p) for p in pose_est]
@@ -716,7 +716,7 @@ def test_tum_cam(cam_pth_fn, ws, save_path="tum_pose_metrics.txt"):
 
 def test_fps(saved_dir, rounds=1, device=torch.device("cuda:0")):
     cams = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(saved_dir, "photometric_cam.pth"))
+        torch.load(osp.join(saved_dir, "photometric_cam.pth"), weights_only=False)
     ).to(device)
     s_model = StaticGaussian.load_from_ckpt(
         torch.load(
@@ -741,7 +741,7 @@ def test_fps(saved_dir, rounds=1, device=torch.device("cuda:0")):
     d_model.set_inference_mode()
 
     try:
-        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"))
+        state_dict = torch.load(osp.join(saved_dir, f"photometric_ugraph_model_{GS_BACKEND.lower()}.pth"), weights_only=False)
         ugraph_model: UGraphGaussian = UGraphGaussian.init_from_state_dict(state_dict, None, device)
         ugraph_model.to(device)
         ugraph_model.eval()

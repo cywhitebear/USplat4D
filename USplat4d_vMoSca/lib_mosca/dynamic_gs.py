@@ -197,7 +197,7 @@ class DynSCFGaussian(nn.Module):
         self.register_buffer("ref_time", torch.zeros(self.N))  # N
         # * init the parameters from file
         logging.info(f"Loading dynamic model from {load_fn}")
-        self.load(torch.load(load_fn))
+        self.load(torch.load(load_fn, weights_only=False))
         self.forward(0)
         self.summary()
         return

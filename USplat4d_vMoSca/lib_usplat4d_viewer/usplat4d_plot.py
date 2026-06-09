@@ -361,9 +361,9 @@ def tfm_pose_sim3_and_se3(aligned_test_camera_path, solved_cam_path, train_camer
     :return: A 6D vector representing the SE3 transformation.
     """
     # Extract rotation and translation
-    aligned_test_camera_T_wi = torch.load(aligned_test_camera_path)
-    solved_cam_T_wi = torch.load(solved_cam_path)
-    train_camera_T_wi = torch.load(train_camera_path)
+    aligned_test_camera_T_wi = torch.load(aligned_test_camera_path, weights_only=False)
+    solved_cam_T_wi = torch.load(solved_cam_path, weights_only=False)
+    train_camera_T_wi = torch.load(train_camera_path, weights_only=False)
 
     new_SE3_aligned_camera = align_ate_c2b_use_a2b(
         traj_a=aligned_test_camera_T_wi,

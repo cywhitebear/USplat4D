@@ -170,7 +170,7 @@ def get_raft_model(ckpt_path, device, small=False, mixed_precision=False):
     args.mixed_precision = mixed_precision
     # model = torch.nn.DataParallel(RAFT(args))
     model = RAFT(args)
-    _stat_dict = torch.load(args.model, map_location="cpu")
+    _stat_dict = torch.load(args.model, map_location="cpu", weights_only=False)
     # remove the module prefix
     state_dict = {}
     for k, v in _stat_dict.items():

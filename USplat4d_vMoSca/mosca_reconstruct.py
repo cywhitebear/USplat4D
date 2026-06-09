@@ -159,7 +159,7 @@ def photometric_warmup(ws, log_path, fit_cfg):
     
     s2d = set_epi_mask_to_s2d_for_bg_render(s2d, EPI_TH, device, use_gt_masks=use_gt_masks)
     cams: MonocularCameras = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"))
+        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"), weights_only=False)
     ).to(device)
 
     photo_solver = DynReconstructionSolver(
@@ -343,7 +343,7 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         )
 
     cams: MonocularCameras = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"))
+        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"), weights_only=False)
     ).to(device)
 
     sub_t_list = [
@@ -596,10 +596,10 @@ def photometric_reconstruct(ws, log_path, fit_cfg, dir_saving_this_run_model):#,
     )
 
     cams: MonocularCameras = MonocularCameras.load_from_ckpt(
-        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"))
+        torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"), weights_only=False)
     ).to(device)
     scaffold = MoSca.load_from_ckpt(
-        torch.load(osp.join(log_path, "mosca", "mosca.pth"))
+        torch.load(osp.join(log_path, "mosca", "mosca.pth"), weights_only=False)
     ).to(device)
 
     # * reset the scaffold mlevel config
@@ -637,7 +637,7 @@ def photometric_reconstruct(ws, log_path, fit_cfg, dir_saving_this_run_model):#,
     )
     if osp.exists(s_model_warmup_path):
         logging.info(f"Load static model from {s_model_warmup_path}")
-        s_model = StaticGaussian.load_from_ckpt(torch.load(s_model_warmup_path)).to(
+        s_model = StaticGaussian.load_from_ckpt(torch.load(s_model_warmup_path, weights_only=False)).to(
             device
         )
     else:
