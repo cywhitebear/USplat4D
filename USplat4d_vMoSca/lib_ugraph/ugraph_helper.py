@@ -330,7 +330,7 @@ class Precompute_helper(nn.Module):
                 continue
                 # x_new = x
             else:
-                breakpoint()
+                pass  # breakpoint() disabled for background runs
             updated_params[name] = x_new
             self.params[name] = x_new
 
@@ -370,7 +370,7 @@ class Precompute_helper(nn.Module):
             elif name in ['transls_interpolation','oris_interpolation']:
                 x_new = x[:,~should_cull]
             else:
-                breakpoint()
+                pass  # breakpoint() disabled for background runs
             updated_graph_para[name] = x_new
             self.graph_para[name] = x_new
 
@@ -445,7 +445,7 @@ class Precompute_helper(nn.Module):
             elif "_key" in name:
                 continue
             else:
-                breakpoint()
+                pass  # breakpoint() disabled for background runs
             updated_params[name] = x_new
             self.params[name] = x_new
 
@@ -486,7 +486,7 @@ class Precompute_helper(nn.Module):
                 edges_others_optimized = torch.tensor(edges_others_optimized, dtype=torch.long, device=device)
                 x_new = edges_others_optimized # CHECK: for dup_key, they has random number of edges
                 if x_new.shape[0]>2000000:
-                    breakpoint()
+                    pass  # breakpoint() disabled for background runs
             elif name in ['edges_local','sq_dists_local','weight_rigidity']:
                 continue
             elif name in ['transls_som','oris_wxyz_som']:
@@ -503,7 +503,7 @@ class Precompute_helper(nn.Module):
                 x_dup = x[:,should_dup]
                 x_new = torch.cat([x,x_dup],dim=1)
             else:
-                breakpoint()
+                pass  # breakpoint() disabled for background runs
             updated_graph_para[name] = x_new
             self.graph_para[name] = x_new
         
@@ -674,7 +674,7 @@ def o3d_knn_p(pts2,pts, num_knn, flag_remove_self=False):
             sq_dists.append(d2[1:])
         if n_num < num_knn:
             print("Warning: not enough neighbors found")
-            breakpoint()
+            pass  # breakpoint() disabled for background runs
     return np.array(sq_dists), np.array(indices)
 
     

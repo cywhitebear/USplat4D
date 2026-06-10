@@ -80,7 +80,7 @@ class UGraphGaussian(nn.Module):
             if precompute==None: # TODO
                 print("precompute is None. Start create precompute from graph_dir...")
                 if graph_dir is None or graph_dir == '':
-                    breakpoint()
+                    pass  # breakpoint() disabled for background runs
                     raise ValueError("graph_dir is None or empty")
                 # precompute=Precompute_helper() # last.ckpt 
                 precompute=Precompute_helper(graph_dir=graph_dir)
@@ -93,7 +93,7 @@ class UGraphGaussian(nn.Module):
             return model
         
         else:
-            breakpoint()
+            pass  # breakpoint() disabled for background runs
             return None
         
     def get_optimizable_list(
@@ -173,7 +173,7 @@ class UGraphGaussian(nn.Module):
                 elif "_key" in full_param_name: # (nk, ...) or (nk)
                     continue
                 else:
-                    breakpoint()
+                    pass  # breakpoint() disabled for background runs
             optimizer.state[old_params] = {}  # Clear before deletion
             del optimizer.state[old_params]
             optimizer.state[p_new] = param_state
@@ -200,7 +200,7 @@ class UGraphGaussian(nn.Module):
                 elif "_key" in full_param_name:
                     continue
                 else:
-                    breakpoint()
+                    pass  # breakpoint() disabled for background runs
             optimizer.state[old_params] = {}  # Clear before deletion
             del optimizer.state[old_params]
             optimizer.state[p_new] = param_state

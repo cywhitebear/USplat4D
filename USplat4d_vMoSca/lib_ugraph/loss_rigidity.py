@@ -137,7 +137,7 @@ def cal_dt_loss(delta_t,oris_xyzw,edges_local,weight_edges,transls_diff_edges):
 
     if np.isnan([loss_local_rigidity_dt.item()]).any():
         print("loss_local_rigidity_dt.item(): ", loss_local_rigidity_dt.item())
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
 
     return loss_local_rigidity_dt,loss_local_rigidity_ori_dt
 
@@ -225,7 +225,7 @@ def cal_rigidity_loss_extra(transls,oris_xyzw,edges_local,weight_edges,dis_local
     
     if np.isnan(list(stats.values())).any():
         print("Warning: NaN detected in stats!", stats)
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     
     return loss, stats
 

@@ -77,7 +77,7 @@ def get_graph_rigidity_interpolation_loss(precompute: Precompute_helper, ts: tor
     # n_neighbors=5 # TODO
     n_neighbors=(edges_graph_nonkey[:,0]==0).sum()
     if n_neighbors!=5:
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     nu=transls_nonkey.shape[1]
     transls_nonkey_ts_most_confident = transls_nonkey[ts_most_confident, torch.arange(nu,device=device)] # [nu,3]
     transls_nonkey_ts_most_confident_edges = transls_nonkey_ts_most_confident.repeat_interleave(n_neighbors, dim=0) # n_edges,3 = nu*n_neighbors,3
@@ -271,9 +271,9 @@ def cal_weight_edges2(weight_param_key_optimizable,exp_sq_dists_key_nonkey_edges
     weights_matrix[edges[:,0],edges[:,1]]=weight_edges
     sum_temp = torch.sum(weights_matrix,dim=-1,keepdim=True)
     if any(sum_temp==0):
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     if torch.isnan(weight_param_key_optimizable).any():
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     weights_matrix_normed=weights_matrix/sum_temp
 
     weight_edges_normed=weights_matrix_normed[edges[:,0],edges[:,1]] # (ne)
@@ -300,7 +300,7 @@ def cal_DQB_nonkeyGaussian(Transls_key_optimizable, oris_xyzw_key_optimizable,
     # prepare
     n_neighbors=(edges[:,0]==0).sum()
     if n_neighbors!=5:
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     # get sk_src_node and sk_dst_node (key nodes)
     ts_most_confident_repeat=ts_most_confident.repeat(n_neighbors,1).T.reshape(-1) # (nu*n_neighbors=ne)
     sk_src_node_xyz_1=Transls_key_optimizable[ts_most_confident_repeat,edges[:,1]] # (ne,3)
@@ -323,7 +323,7 @@ def cal_DQB_nonkeyGaussian(Transls_key_optimizable, oris_xyzw_key_optimizable,
 
     if torch.isnan(weight_param_key_optimizable).any():
         print("weight_param_key_optimizable is nan")
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
 
     
     src_xyz=src_xyz_1_nonkey[None].repeat(nt,1,1).reshape(-1,3) # (nt*nu,3)
@@ -354,7 +354,7 @@ def cal_DQB_nonkeyGaussian(Transls_key_optimizable, oris_xyzw_key_optimizable,
     quat_dst_xyzw=quat_dst[:,[1,2,3,0]] # [n_mask,4] 
     if not torch.allclose(quat_dst_xyzw.norm(dim=-1),torch.ones(quat_dst_xyzw.shape[0],device=quat_dst_xyzw.device)):
         print("quat_dst_xyzw's norm != 1")
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     Transls_interpolation=mu_dst.reshape(nt,nu,3) # [nt,nu,3]
     Oris_xyzw_interpolation=quat_dst_xyzw.reshape(nt,nu,4) # [nt,nu,4]
 
@@ -404,7 +404,7 @@ def get_DQB_nonkeyGaussian(precompute: Precompute_helper, ts: torch.Tensor):
     # given ts_most_confident, transls_key, transls_nonkey
     n_neighbors=(edges_graph_nonkey[:,0]==0).sum()
     if n_neighbors!=5:
-        breakpoint()
+        pass  # breakpoint() disabled for background runs
     nu=transls_nonkey.shape[1]
     transls_nonkey_ts_most_confident = transls_nonkey[ts_most_confident, torch.arange(nu,device=device)] # [nu,3]
     transls_nonkey_ts_most_confident_edges = transls_nonkey_ts_most_confident.repeat_interleave(n_neighbors, dim=0) # n_edges,3 = nu*n_neighbors,3

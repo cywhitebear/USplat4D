@@ -1074,6 +1074,7 @@ class DynReconstructionSolver:
                     logging.info(f"Reset event happened, protect tracking loss")
                     latest_track_event = step
 
+            torch.cuda.empty_cache()  # release fragmented pool before densification/pruning
             if (
                 s_gs_ctrl_cfg is not None
                 and step >= s_gs_ctrl_start
@@ -1090,6 +1091,7 @@ class DynReconstructionSolver:
                     or (GS_BACKEND not in ["native_add3"]),
                 )
             
+            torch.cuda.empty_cache()  # release pool freed by static GS control before dynamic densification
             if (
                 d_gs_ctrl_cfg is not None
                 and step >= d_gs_ctrl_start
