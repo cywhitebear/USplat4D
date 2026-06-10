@@ -501,7 +501,7 @@ class DynReconstructionSolver:
         logging.info(f"Finetune with GS-BACKEND={GS_BACKEND.lower()}")
 
         torch.cuda.empty_cache()
-        n_frame = 8 # 1 #8
+        n_frame = 2 # reduced from 8: avoids [nt_all, ne, 3] OOM for large sequences (spin/teddy 400+ frames)
 
         d_flag = d_model is not None
         ugraph_flag = ugraph_model is not None
@@ -613,6 +613,7 @@ class DynReconstructionSolver:
                     yield indices[i:i + batch_size]
 
         batch_generator = infinite_batches(N=cams.T, batch_size=n_frame)
+        torch.cuda.empty_cache()  # release model-loading cache before training
         for step in (
             pbar := tqdm(range(total_steps))
         ):
@@ -935,6 +936,7 @@ class DynReconstructionSolver:
 
             ##############################################################
             # ugraph_model
+            torch.cuda.empty_cache()  # release forward-pass cache before ugraph loss
             if ugraph_flag and d_flag:
                 ts=torch.tensor(view_ind_list,device=d_model.device)
                 # is_skip_nonkey_graph=use_DQB_directly # use DQB result for training directly
@@ -1014,6 +1016,7 @@ class DynReconstructionSolver:
                 + loss_track * lambda_track
                 + loss_fg_mask * 1.0
             )
+            torch.cuda.empty_cache()  # release fragmented reserved pool before backward
             loss.backward()
 
             pbar.set_description(f"{step} L:{loss.item():.3f} G:{ugraph_loss.item():.3f}")

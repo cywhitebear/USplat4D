@@ -159,8 +159,10 @@ def get_key_edge_rigidity_loss(Transls_optimizable, Dists_optimizable, weight_di
     weight_normed=torch.abs(weight_distance_optimizable)/torch.norm(weight_distance_optimizable,dim=-1,p=1)[:,None] # (nu,nk)
     weight_edges=weight_normed[edges[:,0],edges[:,1]] # (ne)
     dis_local_canonical_edge=Dists_optimizable[edges[:,0],edges[:,1]] # (ne) CHECK order
+    # Slice to batch frames only: avoids [nt_all, ne, 3] OOM (427 frames × 50k edges × 3 = ~256 MB)
+    # Stochastic sampling of frames is valid — over training, all frames are covered
     # loss_rigidity,stats_rigidity=cal_rigidity_loss(Transls_optimizable,oris_xyzw_optimizable_normed,edges,weight_edges,dis_local_canonical_edge,"graph_key/")
-    loss_rigidity,stats_rigidity=cal_rigidity_loss_extra(Transls_optimizable,oris_xyzw_optimizable_normed,edges,weight_edges,dis_local_canonical_edge,"graph_key/")
+    loss_rigidity,stats_rigidity=cal_rigidity_loss_extra(Transls_optimizable[ts],oris_xyzw_optimizable_normed[ts],edges,weight_edges,dis_local_canonical_edge,"graph_key/")
     
     if flag_train_orientation:
         pass

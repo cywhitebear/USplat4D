@@ -1221,7 +1221,7 @@ if __name__ == "__main__":
         setattr(cfg, "photo_d_ctrl_densify_steps", 300) # 300
         setattr(cfg, "photo_d_ctrl_prune_steps", 300) # 300
         setattr(cfg, "photo_d_ctrl_reset_steps", 1000)
-        
+
         execution_times = []
         start_time = time.time()
         photometric_reconstruct_from_pretrained(args.ws, logdir, cfg, args.graph_dir,loaded,dir_saving_this_run_model,device=device)
