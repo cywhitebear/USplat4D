@@ -16,10 +16,11 @@ def run_rendering():
     parser.add_argument("--use_ugraph", action="store_true")
     parser.add_argument("--pth_save_dir", type=str, required=False) # if not provided, will use the same as work_dir
     parser.add_argument("--images_dir", type=str, required=False) # if provided, show images on camera frustums
+    parser.add_argument("--no_frustums", action="store_true") # hide camera frustums
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    renderer = Renderer(args.cfg_fn, device, args.work_dir, port=args.port, bg_flag=False, fg_flag=True, pth_save_dir=args.pth_save_dir, use_ugraph=args.use_ugraph, images_dir=args.images_dir)
+    renderer = Renderer(args.cfg_fn, device, args.work_dir, port=args.port, bg_flag=False, fg_flag=True, pth_save_dir=args.pth_save_dir, use_ugraph=args.use_ugraph, images_dir=args.images_dir, no_frustums=args.no_frustums)
     while True:
         time.sleep(1.0)
 

@@ -1,9 +1,10 @@
 #!/bin/bash
 gpu_id=0
+PYTHON=/home/ee904/miniconda3/envs/usplat4d/bin/python
 
 dataset_name=iphone
 
-seq_names=(paper-windmill) # Try any instance
+seq_names=(spin teddy wheel) # Run spin teddy wheel one by one
 # seq_names=(
 #         'spin'
 #         'teddy'
@@ -37,7 +38,7 @@ for seq_name in "${seq_names[@]}"
 do
     echo "Starting training for ${seq_name}"
 
-    CUDA_VISIBLE_DEVICES=$gpu_id python usplat4d_prep.py \
+    CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON usplat4d_prep.py \
         --seq_name $seq_name \
         --func_name main1 \
         --dataset_name $dataset_name \
@@ -48,7 +49,7 @@ do
         --ini_folder_path $ini_folder_path \
         --usplat4d_folder_path $usplat4d_folder_path
       #   --extra_save_str $extra_save_str # comment if no extra_save_str
-    CUDA_VISIBLE_DEVICES=$gpu_id python usplat4d_prep.py \
+    CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON usplat4d_prep.py \
         --seq_name $seq_name \
         --func_name main23 \
         --dataset_name $dataset_name \
@@ -82,7 +83,7 @@ do
 
     dir_name_saved_propressinging_model=dr${depth_ratio}_thr${threshold_min_set}_v${version_key_edges}${extra_save_str} # _ab_key_selection _ab_key_selection2
 
-    CUDA_VISIBLE_DEVICES=$gpu_id python mosca_reconstruct.py \
+    CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON mosca_reconstruct.py \
         --cfg ./profile/iphone/iphone_fit.yaml \
         --ws /media/ee904/DATA1/Yun/Datasets/MoSca/iphone/${seq_name} \
         --run_ugraph \

@@ -61,7 +61,8 @@ class Renderer:
         relative_dir_saved_mosca_model: str | None = None,
         start_viewer: bool = True,
         images_dir: str | None = None,
-    ):  
+        no_frustums: bool = False,
+    ):
         if pth_save_dir==None:
             pth_save_dir=work_dir
             if relative_dir_saved_mosca_model is not None:
@@ -71,6 +72,7 @@ class Renderer:
         self.device = device
         self.ugraph_model = self.d_model.ugraph_model
         self.images_dir = images_dir
+        self.no_frustums = no_frustums
 
         self.work_dir = work_dir
         self.global_step = 0
@@ -173,8 +175,8 @@ class Renderer:
             self.viewer._show_bg_checkbox.value=self.bg_flag
             self.viewer._show_fg_checkbox.value=self.fg_flag
             print("Renderer initialized")
-            # Add camera frustums
-            self.add_camera_frustums(server)
+            if not self.no_frustums:
+                self.add_camera_frustums(server)
     @torch.inference_mode()
     def render_fn(self, camera_state: CameraState, img_wh: tuple[int, int]):
         if self.viewer is None:
@@ -266,8 +268,8 @@ class Renderer:
             self.viewer._show_bg_checkbox.value=self.bg_flag
             self.viewer._show_fg_checkbox.value=self.fg_flag
             print("Renderer initialized")
-            # Add camera frustums
-            self.add_camera_frustums(server)
+            if not self.no_frustums:
+                self.add_camera_frustums(server)
 
     def add_camera_frustums(self, server, frustum_scale=0.05):
         """Add camera frustums to the viser scene, optionally with images."""

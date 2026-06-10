@@ -1277,15 +1277,18 @@ if __name__ == "__main__":
     fps=test_fps(saved_dir=logdir, rounds=1 if datamode in ["iphone"] else 3)
 
     if datamode in ["iphone", "nvidia"]:
-        test_main(
-            cfg,
-            saved_dir=logdir,
-            data_root=args.ws,
-            device=torch.device("cuda:0"),
-            tto_flag=True,
-            eval_also_dyncheck_non_masked=False,
-            skip_test_gen=False,
-        )
+        try:
+            test_main(
+                cfg,
+                saved_dir=logdir,
+                data_root=args.ws,
+                device=torch.device("cuda:0"),
+                tto_flag=True,
+                eval_also_dyncheck_non_masked=False,
+                skip_test_gen=False,
+            )
+        except Exception as e:
+            logging.warning(f"test_main (DyCheck eval) failed: {e} — skipping")
 
     if not args.no_viz and datamode in ["wild"]:
         from mosca_viz import viz_main

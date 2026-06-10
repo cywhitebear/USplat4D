@@ -77,6 +77,32 @@ def get_navie_ori_distances(Oris_rel): # TODO
     norm_ori_rel_so3=torch.mean(norm_oris_rel_so3,axis=0) # (nk, nk)
     return 1.0 - torch.cos(norm_ori_rel_so3) # (nk, nk)
 
+def compute_ori_distances_chunked(Oris_xyzw, chunk_size=50):
+    """Chunked replacement for calculate_edge_relative_orientation + get_navie_ori_distances.
+    Avoids (nt, nk, nk, 4) tensor: for nt=427,nk=1500 that is 15 GB x3 = 46 GB OOM.
+    Processes chunk_size rows of nk at a time; peak ~2 GB per chunk at chunk_size=50.
+    Returns (nk, nk) float32 orientation distance matrix.
+    """
+    import pypose as pp
+    nt = Oris_xyzw.shape[0]
+    nk = Oris_xyzw.shape[1]
+    result = torch.zeros(nk, nk, dtype=torch.float32)
+    raw = Oris_xyzw.tensor()  # (nt, nk, 4)
+    for i_start in range(0, nk, chunk_size):
+        i_end = min(i_start + chunk_size, nk)
+        c = i_end - i_start
+        chunk_i = raw[:, i_start:i_end, :].unsqueeze(2).expand(-1, -1, nk, -1).contiguous()  # (nt, c, nk, 4)
+        all_j = raw.unsqueeze(1).expand(-1, c, -1, -1).contiguous()  # (nt, c, nk, 4)
+        Ts1_pp = pp.LieTensor(chunk_i, ltype=pp.SO3_type)
+        Ts2_pp = pp.LieTensor(all_j, ltype=pp.SO3_type)
+        Ts12 = Ts1_pp.Inv() * Ts2_pp  # (nt, c, nk) SO3
+        log_chunk = Ts12.Log()  # (nt, c, nk, 3)
+        norm_chunk = torch.norm(log_chunk.tensor(), dim=-1)  # (nt, c, nk)
+        mean_chunk = torch.mean(norm_chunk, dim=0)  # (c, nk)
+        result[i_start:i_end] = 1.0 - torch.cos(mean_chunk)
+        del chunk_i, all_j, Ts1_pp, Ts2_pp, Ts12, log_chunk, norm_chunk, mean_chunk
+    return result
+
 
 def compute_accel_loss(transls):
     # transls [nt,n,3] or oris [nt,n,4]
@@ -932,11 +958,6 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
 
     # [1] load data
     nt=count_out_dict_files(dict_dir)
-    dicts=[]
-    for t in range(nt):
-        with open(f"{dict_dir}/out_dict_{t}.pkl", 'rb') as file:
-            loaded_dict = pickle.load(file)
-            dicts.append(loaded_dict)
 
     with open(f"{dict_dir}/{file_effective}", 'rb') as file:
         effective_dict = pickle.load(file)
@@ -965,24 +986,33 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
 
     i_target=0
     i_show=10
-    Transls=np.array([dicts[t]["means"][ids].cpu().numpy() for t in range(nt)]) #(t,|ids|,3)
-    Quats_wxyz=np.array([dicts[t]["quats"][ids].cpu().numpy() for t in range(nt)]) # wxyz (t,|ids|,4)
+    # Stream key-point data from pkl files (avoids loading all nt files into RAM simultaneously)
+    Ng=Contribs_all.shape[1]
+    _Transls_rows, _Quats_rows, _W2Cs_rows = [], [], []
+    for t in range(nt):
+        with open(f"{dict_dir}/out_dict_{t}.pkl", 'rb') as file:
+            d = pickle.load(file)
+        _Transls_rows.append(d["means"][ids].cpu().numpy())
+        _Quats_rows.append(d["quats"][ids].cpu().numpy())
+        _W2Cs_rows.append(d["w2c"].cpu().numpy())
+        del d
+    Transls=np.array(_Transls_rows); del _Transls_rows  #(nt,nk,3)
+    Quats_wxyz=np.array(_Quats_rows); del _Quats_rows   # wxyz (nt,nk,4)
     Quats_xyzw=Quats_wxyz[...,[1,2,3,0]] # xyzw
     Contribs=Contribs_all[:,ids]
     Contribs_sort=np.array([get_order(Contribs[:,i]) for i in range(Contribs.shape[1])]).transpose(1,0)
-    W2Cs=np.array([dicts[t]["w2c"].cpu().numpy() for t in range(nt)])
+    W2Cs=np.array(_W2Cs_rows); del _W2Cs_rows
     SE3s=np.concatenate([Transls,Quats_xyzw],axis=-1) # xyz xyzw (required by pypose)
     SE3s=torch.tensor(SE3s,dtype=torch.float32) #,device='cuda')
     Oris_xyzw=pp.LieTensor(SE3s[:,:,3:],ltype=pp.SO3_type)
     Oris=pp.LieTensor(SE3s[:,:,3:],ltype=pp.SO3_type).Log()
     lie_tensor_SE3s=pp.LieTensor(SE3s, ltype=pp.SE3_type)
-    Depths_info_perG=torch.stack([dicts[t]['depths_info_perG'].cpu() for t in range(nt)])
-    Depths_info_perG=depth_ratio*torch.ones_like(Depths_info_perG) # TEST
+    Depths_info_perG=depth_ratio*torch.ones((nt,Ng),dtype=torch.float32) # depths overwritten with constant anyway
     print(f"TEST: set Depths_info_perG={depth_ratio}*torch.ones_like(Depths_info_perG).") # test
     Depths_info_perG_key=Depths_info_perG[:,ids]
     nk=len(ids) # num of key points
     print("nk:",nk)
-    print("dicts[0]['means'].shape:", dicts[0]["means"].shape)
+    print("num Gaussians:", Ng)
 
     # draw
     if flag_draw_contribs_sample:
@@ -1019,8 +1049,8 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
     # [2] Graph initialization for key Gaussians
     # Initializations
     # 0. naive ori distance
-    Oris_rel=calculate_edge_relative_orientation(Oris_xyzw)
-    Ori_distances_naive=get_navie_ori_distances(Oris_rel) # (nk, nk)
+    # Chunked: avoids (nt,nk,nk,4) OOM (e.g. 46 GB for nt=427,nk=1500)
+    Ori_distances_naive=compute_ori_distances_chunked(Oris_xyzw)
 
     # 1. vertices
     # 1.1 positions
@@ -1032,8 +1062,12 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
     Oris_xyzw_optimizable=Oris_xyzw.clone().requires_grad_(True) # LieTensor SO3
 
     # 2. edge distance
-    Dists = np.array([distance_matrix(Transls[t], Transls[t]) for t in range(nt)])
-    Dists_optimizable=np.mean(Dists,axis=0)
+    # Incremental mean avoids (nt,nk,nk) float64 array (e.g. 7.7 GB for nt=427,nk=1500)
+    _Dists_sum = np.zeros((nk, nk), dtype=np.float64)
+    for t in range(nt):
+        _Dists_sum += distance_matrix(Transls[t], Transls[t])
+    Dists_optimizable = _Dists_sum / nt
+    del _Dists_sum
     Dists_optimizable=torch.tensor(Dists_optimizable,dtype=torch.float32,requires_grad=True)
 
     Ori_distances_optimizable=Ori_distances_naive.clone()
@@ -1252,8 +1286,7 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
 
     # [4] Graph initialization for non-key Gaussians
     # 1. prepare data for non-key Gaussians
-    Ng=dicts[0]["means"].shape[0] # num of all Gaussians
-    nt=len(dicts)
+    Ng=Contribs_all.shape[1]  # total Gaussians (same as Contribs_all cols)
     ids2=[i for i in range(Ng) if i not in ids] # ids of non-target nodes
     Contribs2_temp=Contribs_all[:,ids2]
     Contribs2_temp_max=Contribs2_temp.max(axis=0)
@@ -1275,8 +1308,16 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
     ids2=np.array(ids2)[Contribs2_temp.max(axis=0)>threshold].tolist() # remove nodes with small contribs #15
 
 
-    Transls2=np.array([dicts[t]["means"][ids2].cpu().numpy() for t in range(nt)]) #(t,|ids|,3)
-    Quats_wxyz2=np.array([dicts[t]["quats"][ids2].cpu().numpy() for t in range(nt)]) # wxyz (t,|ids|,4)
+    # Stream non-key data from pkl files
+    _Transls2_rows, _Quats2_rows = [], []
+    for t in range(nt):
+        with open(f"{dict_dir}/out_dict_{t}.pkl", 'rb') as file:
+            d = pickle.load(file)
+        _Transls2_rows.append(d["means"][ids2].cpu().numpy())
+        _Quats2_rows.append(d["quats"][ids2].cpu().numpy())
+        del d
+    Transls2=np.array(_Transls2_rows); del _Transls2_rows  #(nt,nu,3)
+    Quats_wxyz2=np.array(_Quats2_rows); del _Quats2_rows   # wxyz (nt,nu,4)
     Quats_xyzw2=Quats_wxyz2[...,[1,2,3,0]] # xyzw
     Contribs2=Contribs_all[:,ids2]
     Contribs_sort2=np.array([get_order(Contribs2[:,i]) for i in range(Contribs2.shape[1])]).transpose(1,0)
@@ -1439,7 +1480,7 @@ def main3(save_dir,file_effective,file_name_graph,depth_ratio,version_key_edges,
     file_path_graph=dict_dir_graph+file_name_graph
 
     torch.save({
-                'dicts': dicts,\
+                'dicts': None,\
                 'ids': ids,\
                 'Contribs': Contribs,\
                 'Transls': Transls,\
@@ -1488,14 +1529,17 @@ def main2(save_dir,voxel_size=0.4,n_min_effective_frames=5,ratio_key=-1):
     folder_dict=f"{save_dir}/out_dicts3"
 
     nt=count_out_dict_files(folder_dict)
-    dicts=[]
+    # Stream pkl files to avoid loading all into RAM simultaneously (can be 8+ GB for long sequences)
+    _Contribs_rows = []
+    means_by_t = []
     for t in range(nt):
         with open(f"{folder_dict}/out_dict_{t}.pkl", 'rb') as file:
-            loaded_dict = pickle.load(file)
-            dicts.append(loaded_dict)
-
-    # Contribs=np.array([dicts[t]['contribs_in_mask'].cpu().numpy() for t in range(nt)]) #### (old)
-    Contribs=np.array([dicts[t]['contribs_strict'].cpu().numpy() for t in range(nt)]) #### 
+            d = pickle.load(file)
+        _Contribs_rows.append(d['contribs_strict'].cpu().numpy())
+        means_by_t.append(d['means'].cpu().numpy())
+        del d
+    Contribs = np.array(_Contribs_rows)
+    del _Contribs_rows
     
     # Safety check for empty Contribs
     if Contribs.size == 0:
@@ -1547,14 +1591,14 @@ def main2(save_dir,voxel_size=0.4,n_min_effective_frames=5,ratio_key=-1):
     else:
         Contribs_up=None
 
-    print("num of gaussians: ",dicts[0]['means'].shape[0])
+    print("num of gaussians: ",means_by_t[0].shape[0])
     # 1st Gaussian selection round
     # select according to contribs
     selected_ids_ts=[]
     for t in range(nt):
         if not flag_remove_outlier:
             contribs=Contribs[t]
-            means=dicts[t]['means'].cpu().numpy()
+            means=means_by_t[t]
         else:
             contribs=Contribs_up[t]
         
@@ -1643,7 +1687,7 @@ def main2(save_dir,voxel_size=0.4,n_min_effective_frames=5,ratio_key=-1):
         # t=nt-1
         t=0
         contribs=Contribs[t]
-        means=dicts[t]['means'].cpu().numpy()
+        means=means_by_t[t]
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')

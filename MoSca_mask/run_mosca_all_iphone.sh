@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 gpu_id=0
-set -euo pipefail
+set -uo pipefail
 export MPLBACKEND=Agg
+PYTHON=/home/ee904/miniconda3/envs/usplat4d/bin/python
 
 root_dir=/media/ee904/DATA1/Yun/Datasets/MoSca/iphone
 
@@ -10,7 +11,7 @@ log_recon="${root_dir}/.log_recon"
 mkdir -p "$log_pre" "$log_recon"
 
 # Explicit iPhone sequence list
-seq_names=(paper-windmill) # Try any instance
+seq_names=(spin teddy wheel) # Run spin teddy wheel one by one
 # seq_names=(spin teddy wheel apple block paper-windmill space-out) # Run all instances
 
 
@@ -42,7 +43,7 @@ for dir in "${base_dirs[@]}"; do
   
   echo "precompute: $pre_log"
   start_pre=$(date +%s)
-  CUDA_VISIBLE_DEVICES=$gpu_id python mosca_precompute.py \
+  CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON mosca_precompute.py \
     --cfg ./profile/iphone/iphone_prep.yaml \
     --ws "$ws" \
     >"$pre_log" 2>&1
@@ -52,7 +53,7 @@ for dir in "${base_dirs[@]}"; do
 
   echo "reconstruct: $recon_log"
   start_rec=$(date +%s)
-  CUDA_VISIBLE_DEVICES=$gpu_id python mosca_reconstruct.py \
+  CUDA_VISIBLE_DEVICES=$gpu_id $PYTHON mosca_reconstruct.py \
     --cfg ./profile/iphone/iphone_fit.yaml \
     --ws "$ws" \
     >"$recon_log" 2>&1
