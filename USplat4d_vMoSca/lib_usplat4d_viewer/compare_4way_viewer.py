@@ -44,33 +44,38 @@ def _newest(pattern):
     return hits[0] if hits else None
 
 
+def _mode1_ckpt(logs2, exp):
+    """Newest mode1 run for exp -> its highest saved_model/step_<N> ckpt pair."""
+    run_dir = _newest(osp.join(logs2, f"{exp}_native_add3_*"))
+    if run_dir is None:
+        return None, None
+    steps = glob.glob(osp.join(run_dir, "saved_model", "step_*"))
+    if not steps:
+        return None, None
+    step_dir = max(steps, key=lambda p: int(p.rsplit("_", 1)[-1]))
+    return (
+        osp.join(step_dir, "photometric_d_model_native_add3.pth"),
+        osp.join(step_dir, "photometric_cam.pth"),
+    )
+
+
 def discover_variants(spin_root):
-    """Return ordered list of (label, d_model_pth, cam_pth) for the 4 variants."""
+    """Return ordered list of (label, d_model_pth, cam_pth) for the 4 variants.
+
+    baseline / observability / render_contrib: mode1 runs in logs2 (final ckpt lives
+    in saved_model/step_<max>/). usplat4d: mode3 ugraph, root with _ugraph suffix.
+    """
     base_log = osp.join(spin_root, "logs", "iphone_fit_native_add3")
     logs2 = osp.join(spin_root, "logs2")
     out = []
 
-    # baseline: June photometric (root, no suffix)
-    d = osp.join(base_log, "photometric_d_model_native_add3.pth")
-    c = osp.join(base_log, "photometric_cam.pth")
-    out.append(("baseline", d, c))
-
-    # ours (mode1, logs2/<exp>_<ts>/): newest per exp_name
     for label, exp in [
+        ("baseline", "iphone_fit"),
         ("observability", "iphone_fit_uar"),
         ("render_contrib", "iphone_fit_uar_ru"),
     ]:
-        run_dir = _newest(osp.join(logs2, f"{exp}_native_add3_*"))
-        if run_dir is None:
-            out.append((label, None, None))
-            continue
-        out.append(
-            (
-                label,
-                osp.join(run_dir, "photometric_d_model_native_add3.pth"),
-                osp.join(run_dir, "photometric_cam.pth"),
-            )
-        )
+        d, c = _mode1_ckpt(logs2, exp)
+        out.append((label, d, c))
 
     # usplat4d (mode3 ugraph, root, _ugraph suffix)
     out.append(
