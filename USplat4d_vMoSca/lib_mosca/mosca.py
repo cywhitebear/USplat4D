@@ -863,6 +863,27 @@ class MoSca(nn.Module):
         topo_ind = self.topo_knn_ind
         topo_w = self.topo_knn_mask.float()  # N,K, binary mask
         topo_w = topo_w / (topo_w.sum(dim=-1, keepdim=True) + 1e-6)  # normalize
+        # === uncertainty-adaptive rigidity (ours, ported from MoSca-u) ===
+        # Up-weight ARAP for low-observation nodes so occluded nodes are pulled
+        # more rigidly by visible neighbours. lambda=0 == bit-identical vanilla.
+        # PER-FRAME u_node_t [T,M] -> topo_w becomes [T,N,K] (time-varying).
+        # uncertainty_source: "observability" (u from _node_certain masks, default)
+        # | "render_contrib" (updatable render-contrib u, set externally).
+        _uar_lambda = getattr(self, "adaptive_rigid_lambda", 0.0)
+        u_node_t = None
+        if _uar_lambda > 0:
+            _src = getattr(self, "uncertainty_source", "observability")
+            _obs = 1.0 - self._node_certain[tids].float()  # [T,M] in {0,1}
+            if _src == "render_contrib":
+                _ru = getattr(self, "_node_render_u", None)
+                if _ru is not None and _ru.shape[1] == self._node_certain.shape[1]:
+                    u_node_t = _ru[tids].to(topo_w)
+                else:
+                    u_node_t = _obs  # fall back until first refresh / after densify
+            else:
+                u_node_t = _obs
+            topo_w = topo_w[None] * (1.0 + _uar_lambda * u_node_t)[:, :, None]  # [T,N,K]
+        # ============================================
         local_coord = get_local_coord(xyz, topo_ind, R_wi)
 
         if detach_tids_mask is not None:
@@ -893,9 +914,17 @@ class MoSca(nn.Module):
                     detach_self=self.mlevel_detach_self_flag.item(),
                 )  # T,N,1,3
 
+                # UAR on multi-level edges too (else ~half the ARAP ignores u_node):
+                # scale each edge by its SOURCE node's (col 0) per-frame uncertainty.
+                _mtopo_w = self.multilevel_arap_topo_w[l][:, None].float()  # [E,1]
+                if _uar_lambda > 0:
+                    _msrc = self.multilevel_arap_edge_list[l][:, 0]           # [E]
+                    _mtopo_w = _mtopo_w[None] * (
+                        1.0 + _uar_lambda * u_node_t[:, _msrc]
+                    )[:, :, None]  # [T,E,1]
                 _loss_coord, _loss_len, _, _ = compute_arap(
                     _local_coord,
-                    self.multilevel_arap_topo_w[l][:, None],
+                    _mtopo_w,
                     temporal_diff_shift,
                     temporal_diff_weight,
                     reduce=reduce_type,
@@ -1492,12 +1521,16 @@ def compute_vel_acc(xyz, R_wi):
 
 def compute_arap(
     local_coord,  # T,N,K,3
-    topo_w,  # N,K
+    topo_w,  # [N,K] (static) OR [T,N,K] (per-frame, ours: time-varying rigidity)
     temporal_diff_shift,
     temporal_diff_weight,
     reduce="mean",
     square=False,
 ):
+    # topo_w.ndim==3 -> per-frame edge weight (uncertainty-adaptive rigidity with
+    # per-t u_node). Each temporal pair (i, i+shift) uses the mean of the two
+    # endpoints' weights. ndim==2 is the original static path (bit-identical).
+    tw3 = topo_w.dim() == 3
     local_coord_len = local_coord.norm(dim=-1, p=2)  # T,N,K
     # the coordinate should be similar
     # the metric should be similar
@@ -1515,8 +1548,9 @@ def compute_arap(
             )
             diff_coord = diff_coord**2
             diff_len = diff_len**2
-        diff_coord = (diff_coord * topo_w[None]).sum(-1)
-        diff_len = (diff_len * topo_w[None]).sum(-1)
+        w = 0.5 * (topo_w[:-shift] + topo_w[shift:]) if tw3 else topo_w[None]
+        diff_coord = (diff_coord * w).sum(-1)
+        diff_len = (diff_len * w).sum(-1)
         if reduce == "sum":
             loss_coord = loss_coord + _w * diff_coord.sum()
             loss_len = loss_len + _w * diff_len.sum()
@@ -1525,8 +1559,9 @@ def compute_arap(
             loss_len = loss_len + _w * diff_len.mean()
         else:
             raise NotImplementedError()
-    loss_coord_global = (local_coord.std(0) * topo_w[..., None]).sum()
-    loss_len_global = (local_coord_len.std(0) * topo_w).sum()
+    tw_g = topo_w.mean(0) if tw3 else topo_w
+    loss_coord_global = (local_coord.std(0) * tw_g[..., None]).sum()
+    loss_len_global = (local_coord_len.std(0) * tw_g).sum()
     assert not torch.isnan(loss_coord) and not torch.isnan(loss_len)
     return loss_coord, loss_len, loss_coord_global, loss_len_global
 

@@ -487,6 +487,9 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
     logging.info(
         f"MoSca: get scaffold with M={scaffold.M} and unit={scaffold.spatial_unit}"
     )
+    # === uncertainty-adaptive rigidity (ours) active in geometry stage too ===
+    scaffold.adaptive_rigid_lambda = getattr(fit_cfg, "adaptive_rigid_lambda", 0.0)
+    scaffold.uncertainty_source = getattr(fit_cfg, "uncertainty_source", "observability")
 
     logging.info("*" * 20 + "MoSca Geo" + "*" * 20)
     # * Optimize the curve with ARAP
@@ -601,6 +604,10 @@ def photometric_reconstruct(ws, log_path, fit_cfg, dir_saving_this_run_model):#,
     scaffold = MoSca.load_from_ckpt(
         torch.load(osp.join(log_path, "mosca", "mosca.pth"), weights_only=False)
     ).to(device)
+    # === uncertainty-adaptive rigidity (ours, ported from MoSca-u) ===
+    # 0 == vanilla. source: "observability" (mask-u) | "render_contrib" (contrib-u).
+    scaffold.adaptive_rigid_lambda = getattr(fit_cfg, "adaptive_rigid_lambda", 0.0)
+    scaffold.uncertainty_source = getattr(fit_cfg, "uncertainty_source", "observability")
 
     # * reset the scaffold mlevel config
     scaffold.set_multi_level(
