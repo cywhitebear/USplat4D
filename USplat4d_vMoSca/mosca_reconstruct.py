@@ -858,7 +858,14 @@ def photometric_reconstruct_from_pretrained(ws, log_path, fit_cfg, graph_dir, lo
     cams:MonocularCameras=loaded["cams"]
 
     ugraph_model=d_model.ugraph_model # None or ugraph_model
-    
+
+    # === uncertainty-adaptive rigidity (ours) on the from-pretrained path too ===
+    # All 4-way variants build on the SAME baseline mosca.pth loaded here; only the
+    # photometric ARAP modulation differs. 0 == vanilla. source: observability |
+    # render_contrib. (usplat4d variant goes through the run_ugraph branch instead.)
+    d_model.scf.adaptive_rigid_lambda = getattr(fit_cfg, "adaptive_rigid_lambda", 0.0)
+    d_model.scf.uncertainty_source = getattr(fit_cfg, "uncertainty_source", "observability")
+
     # load solved camera and s2d and rescale
     print('='*20)
     print("Loading solved camera and s2d...")
