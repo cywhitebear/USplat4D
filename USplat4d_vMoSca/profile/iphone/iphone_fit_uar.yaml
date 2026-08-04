@@ -98,5 +98,5 @@ photo_dyn_node_densify_record_start_steps: 2000
 # photo_dyn_node_densify_record_start_steps: 0
 
 # === uncertainty-adaptive rigidity (ours), observability source ===
-adaptive_rigid_lambda: 2.0
+adaptive_rigid_lambda: 10.0
 uncertainty_source: observability
