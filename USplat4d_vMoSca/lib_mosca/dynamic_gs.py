@@ -475,6 +475,40 @@ class DynSCFGaussian(nn.Module):
             sph[..., :3] = cate_sph  # zero pad
         return mu_live, fr_live, s, o, sph
 
+    @torch.no_grad()
+    def compute_render_node_u(self, cams, subsample_t=1, eps=1e-4):
+        # (ours) usplat-style observation uncertainty, MEASURED FROM THE CURRENT
+        # MODEL and updatable mid-training: render each fg frame, read the
+        # rasterizer's per-Gaussian contribs, scatter to nodes via attach_ind ->
+        # per-node observability o[t]; u = 1 - percentile_rank(o) in [0,1]. [T,M].
+        from lib_render.render_helper import render
+
+        T, M = int(self.scf.T), int(self.scf.M)
+        H, W = int(cams.default_H), int(cams.default_W)
+        device = self.scf.device
+        K = cams.K(H, W).to(device)
+        o_tm = torch.zeros(T, M, device=device)
+        for t in range(0, T, max(1, int(subsample_t))):
+            fg = self.forward(int(t), use_ugraph=False)
+            out = render([fg], H, W, K=K, T_cw=cams.T_cw(int(t)).to(device))
+            contrib = out["contrib"].to(device)  # [P_fg] aligned with fg order
+            o_tm[t].scatter_add_(0, self.attach_ind.long(), contrib)
+        if int(subsample_t) > 1:  # fill skipped frames by nearest-computed
+            got = list(range(0, T, int(subsample_t)))
+            for t in range(T):
+                if t not in got:
+                    o_tm[t] = o_tm[min(got, key=lambda g: abs(g - t))]
+        # Percentile-rank normalize (contribs heavy-tailed; quantile collapses most
+        # nodes to ~1). Rank spreads uniformly (mean~0.5), keeps ordering; per (t,node)
+        # so per-frame occlusion preserved. unobserved (o=0) -> bottom -> u~1.
+        flat = o_tm.reshape(-1)
+        order = flat.argsort()
+        rank = torch.empty_like(flat)
+        rank[order] = torch.arange(flat.numel(), device=flat.device, dtype=flat.dtype)
+        o_pct = rank / max(flat.numel() - 1, 1)
+        u = (1.0 - o_pct).reshape(T, M)
+        return u.contiguous()  # [T,M]
+
     def local_gs_warp(
         self,
         query_xyz: torch.Tensor,

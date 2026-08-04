@@ -646,6 +646,15 @@ class DynReconstructionSolver:
                 d_model.zero_grad()
                 # if step % topo_update_feq == 0:
                 #     d_model.scf.update_topology()
+                # (ours) refresh render-contrib observation uncertainty from the
+                # CURRENT model (usplat-style u, updated mid-training). Only when
+                # uncertainty_source == render_contrib; else no-op.
+                if (
+                    getattr(d_model.scf, "uncertainty_source", "observability")
+                    == "render_contrib"
+                    and step % 200 == 0
+                ):
+                    d_model.scf._node_render_u = d_model.compute_render_node_u(cams)
             if ugraph_flag:
                 # optimizer_ugraph.zero_grad()
                 for opt in optimizers_ugraph.values():

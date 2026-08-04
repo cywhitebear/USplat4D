@@ -182,11 +182,14 @@ def render_cam_pcl(
         rotations=rotations,
         cov3D_precomp=cov3D_precomp.float(),
     )
+    contrib = None
     if len(ret) == 2:
         rendered_image, radii = ret
         depth, alpha = None, None
     elif len(ret) == 4:
         rendered_image, radii, depth, alpha = ret
+    elif len(ret) == 5:
+        rendered_image, radii, depth, alpha, contrib = ret  # (ours) per-Gaussian contribution [P]
     else:
         raise ValueError(f"Unexpected return value from rasterizer with len={len(ret)}")
     if verbose:
@@ -202,8 +205,8 @@ def render_cam_pcl(
         "viewspace_points": screenspace_points,
         "visibility_filter": radii > 0,
         "radii": radii,
+        "contrib": contrib,  # (ours) per-Gaussian rendering contribution, image-space invariant
     }
-
     if center_handling_flag:
         for k in ["rgb", "dep", "alpha", "buf"]:
             if ret[k] is None:
