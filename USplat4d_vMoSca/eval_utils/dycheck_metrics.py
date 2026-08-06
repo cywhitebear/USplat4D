@@ -82,10 +82,10 @@ def compute_psnr(
     Returns:
         jnp.ndarray: PSNR in dB of shape ().
     """
-    if torch.cuda.is_available():
+    try:
         tmp_device = jax.devices("gpu")[local_rank]
-    else:
-        tmp_deivce = jax.devices("cpu")[0]
+    except RuntimeError:
+        tmp_device = jax.devices("cpu")[0]
 
     with jax.default_device(tmp_device):
         mse = (img0 - img1) ** 2
@@ -133,9 +133,9 @@ def compute_ssim(
     Returns:
         jnp.ndarray: SSIM in range [0, 1] of shape ().
     """
-    if torch.cuda.is_available():
+    try:
         tmp_device = jax.devices("gpu")[local_rank]
-    else:
+    except RuntimeError:
         tmp_device = jax.devices("cpu")[0]
 
     with jax.default_device(tmp_device):
